@@ -96,6 +96,8 @@ const go = (hash) => {
 const typeLink = (t, query = '') => `#/${TYPES[t].path}${query}`;
 
 /* ───────── 헤더 ───────── */
+const APP_VERSION = 'v1.1.0-beta1';
+
 function logoSvg() {
   const NS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS, 'svg');
@@ -114,12 +116,24 @@ function logoSvg() {
 function renderHeader(path) {
   const top = document.getElementById('top');
   const cur = path.split('/')[1] || '';
+  const mob = document.getElementById('mobnav');
+  if (mob) {
+    const item = (href, ic, label, on) => h('a', { href, class: on ? 'on' : '' }, h('span', { 'aria-hidden': 'true' }, ic), label);
+    mob.replaceChildren(
+      item('#/', '⌂', '홈', cur === ''),
+      item('#/songs', '♫', '노래', cur === 'songs'),
+      item('#/info', '✦', '정보', cur === 'info'),
+      item('#/jobs', '＋', '모집', cur === 'jobs'),
+      item(me ? `#/u/${encodeURIComponent(me.username)}` : '#/login', '☻', me ? '마이' : '로그인', cur === 'u' || cur === 'members' || cur === 'me' || cur === 'login' || cur === 'signup')
+    );
+  }
   const tab = (href, label, on) => h('a', { class: 'tab', href, 'aria-selected': on ? 'true' : 'false' }, label);
   top.replaceChildren(
     h(
       'div',
       { class: 'bar' },
       h('a', { class: 'logo', href: '#/', 'aria-label': '이음크루 홈' }, logoSvg(), h('span', null, '이음', h('b', null, '크루'))),
+      h('span', { class: 'ver-badge', title: `이음크루 ${APP_VERSION}` }, APP_VERSION),
       h('span', { class: 'spacer' }),
       me
         ? [
@@ -184,29 +198,92 @@ const cards = (items, empty = '아직 글이 없어요.') =>
   items.length ? h('div', { class: 'cards' }, items.map(postCard)) : h('div', { class: 'empty' }, empty);
 
 /* ───────── 홈 ───────── */
+function dday(deadline) {
+  if (!deadline) return '';
+  const d = Math.ceil((new Date(deadline + 'T23:59:59') - Date.now()) / 86400000);
+  return d < 0 ? '마감' : d === 0 ? 'D-DAY' : `D-${d}`;
+}
+
+function projectCard(p) {
+  const ex = p.extra || {};
+  const tags = [ex.role, ...(p.tags || [])].filter(Boolean).slice(0, 4);
+  const desc = (p.body || '').replace(/\s+/g, ' ').slice(0, 60);
+  return h(
+    'a',
+    { class: 'card project', href: `#/post/${p.id}` },
+    h('div', { class: 'cover c' + (p.id % 3) }, h('span', { class: 'status' }, JOB_KINDS[ex.kind] === '구직' ? '구직' : '모집중'), h('span', { class: 'symbol', 'aria-hidden': 'true' }, '♫')),
+    h(
+      'div',
+      { class: 'pbody' },
+      h('div', { class: 'title' }, p.title),
+      h('div', { class: 'desc' }, desc),
+      h('div', { class: 'chips' }, tags.map((t) => h('span', { class: 'chip' }, t)), h('span', { class: 'chip warn' }, '무페이')),
+      h('div', { class: 'pfoot' }, h('span', null, '👤 ' + p.author.username), h('span', null, dday(ex.deadline) || ago(p.created_at)))
+    )
+  );
+}
+
+function workCard(p) {
+  return h(
+    'a',
+    { class: 'card work', href: `#/post/${p.id}` },
+    h('div', { class: 'work-icon', 'aria-hidden': 'true' }, ['♫', '◉', '♪', '♬'][p.id % 4]),
+    h('div', { class: 'title' }, p.title),
+    h('div', { class: 'muted small' }, '@' + p.author.username)
+  );
+}
+
+const FEATURES = [
+  ['🎵', '합작 프로젝트', '작곡, 작사, 보컬, 조교, 믹싱, 일러스트, 영상 등 다양한 분야의 창작자를 연결해요.'],
+  ['🤝', '크리에이터 모집', '원하는 역할의 참가자를 직접 모집하고 새로운 팀을 만들어 보세요.'],
+  ['📚', '창작 자료실', '보컬로이드, UTAU, 작곡, 믹싱 등 음악 제작에 필요한 정보를 공유해요.'],
+];
+
 async function pageHome() {
   const d = await api('GET', '/api/home');
-  const sec = (t) =>
+  const head = (title, desc, href, more) =>
+    h('div', { class: 'section-head' }, h('div', null, h('h2', null, title), desc ? h('div', { class: 'muted small' }, desc) : null), h('a', { class: 'more', href }, more));
+  return h(
+    'div',
+    null,
+    h(
+      'section',
+      { class: 'hero' },
+      h('div', { class: 'hero-label' }, '✦ MUSIC CREATOR COMMUNITY'),
+      h('h1', null, '음악을 만드는 사람들을 ', h('span', null, '잇다.')),
+      h('p', { class: 'muted' }, '작곡가부터 보컬, 일러스트레이터, 영상 제작자까지. 함께 음악을 만들고 새로운 프로젝트를 시작해 보세요.'),
+      h('p', { class: 'muted small' }, `멤버 ${d.stats.members} · 노래 ${d.stats.songs} · 모집 중 ${d.stats.open_jobs}`),
+      h(
+        'div',
+        { class: 'row' },
+        h('a', { class: 'btn primary', href: me ? '#/write/song' : '#/signup' }, me ? '노래 올리기' : '가입하고 시작하기'),
+        h('a', { class: 'btn', href: me ? '#/write/job' : '#/jobs' }, me ? '프로젝트 모집하기' : '합작 찾아보기 →')
+      )
+    ),
     h(
       'section',
       { class: 'section' },
-      h('div', { class: 'section-head' }, h('h2', null, TYPES[t].label), h('a', { class: 'btn sm', href: typeLink(t) }, '더 보기')),
-      cards(d[t], t === 'job' ? '모집 중인 글이 아직 없어요.' : '첫 글을 기다리고 있어요!')
-    );
-  return h(
-    'div',
-    { class: 'stack' },
-    h('div', null, h('h1', null, '같이 만들어요, 무페이 합작'), h('p', { class: 'muted' }, '자작곡과 커버를 나누고, 작업 팁을 모으고, 함께할 사람을 찾아요.')),
-    h('p', { class: 'muted small' }, `멤버 ${d.stats.members} · 노래 ${d.stats.songs} · 모집 중 ${d.stats.open_jobs}`),
-    h(
-      'div',
-      { class: 'row' },
-      h('a', { class: 'btn primary', href: me ? '#/write/song' : '#/signup' }, me ? '노래 올리기' : '가입하고 시작하기'),
-      h('a', { class: 'btn primary', href: me ? '#/write/job' : '#/signup' }, me ? '구인·구직 글쓰기' : '구인구직 보기')
+      head('🔥 지금 모집 중인 합작', '새로운 프로젝트에 참여해 보세요.', typeLink('job'), '전체 보기 →'),
+      d.job.length ? h('div', { class: 'projects' }, d.job.slice(0, 3).map(projectCard)) : h('div', { class: 'empty' }, '모집 중인 글이 아직 없어요.')
     ),
-    sec('song'),
-    sec('job'),
-    sec('info')
+    h(
+      'section',
+      { class: 'section' },
+      head('🎧 최근 작업물', '이음크루에서 올라온 새로운 음악들', typeLink('song'), '더 보기 →'),
+      d.song.length ? h('div', { class: 'works' }, d.song.slice(0, 4).map(workCard)) : h('div', { class: 'empty' }, '첫 곡을 기다리고 있어요!')
+    ),
+    h(
+      'section',
+      { class: 'section' },
+      head('정보·팁', '', typeLink('info'), '더 보기 →'),
+      cards(d.info.slice(0, 4), '첫 글을 기다리고 있어요!')
+    ),
+    h(
+      'section',
+      { class: 'section' },
+      h('div', { class: 'section-head' }, h('h2', null, '이음크루에서 할 수 있는 것')),
+      h('div', { class: 'features' }, FEATURES.map(([ic, t, p]) => h('article', { class: 'feature' }, h('div', { class: 'ficon', 'aria-hidden': 'true' }, ic), h('h3', null, t), h('p', { class: 'muted small' }, p))))
+    )
   );
 }
 

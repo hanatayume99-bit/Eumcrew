@@ -6,14 +6,17 @@ const TYPES = {
   song: { path: 'songs', label: '노래', icon: '♪', write: '노래 올리기' },
   info: { path: 'info', label: '정보·팁', icon: '✦', write: '정보 쓰기' },
   job: { path: 'jobs', label: '구인구직', icon: '☺', write: '구인·구직 글쓰기' },
+  qna: { path: 'qna', label: '질문답변', icon: '?', write: '질문하기' },
 };
 const PATH_TO_TYPE = Object.fromEntries(Object.entries(TYPES).map(([t, v]) => [v.path, t]));
 const SONG_KINDS = { original: '자작곡', cover: '커버', collab: '합작', remix: '리믹스' };
 const JOB_KINDS = { hire: '구인', seek: '구직' };
-const INFO_CATEGORIES = ['작곡', '작사', '믹싱/마스터링', '보컬', '일러스트', '영상', '합작/행사', '기타'];
-const ROLES = ['작곡', '작사', '편곡', '믹싱', '마스터링', '보컬', '일러스트', '영상', '기타'];
+const INFO_CATEGORIES = ['작곡', '작사', '편곡', '조교', '믹싱/마스터링', '보컬', '일러스트', '영상', '합작/행사', '기타'];
+const ROLES = ['작곡', '작사', '편곡', '조교', '믹싱', '마스터링', '보컬', '일러스트', '영상', '기타'];
+const MAX_IMAGES = 6;
 
 let me = null;
+const imgUrl = (id) => `/img/${id}`;
 
 /* ───────── 유틸 ───────── */
 function h(tag, attrs, ...kids) {
@@ -124,6 +127,8 @@ function renderHeader(path) {
       item('#/songs', '♫', '노래', cur === 'songs'),
       item('#/info', '✦', '정보', cur === 'info'),
       item('#/jobs', '＋', '모집', cur === 'jobs'),
+      item('#/qna', '?', '질문', cur === 'qna'),
+      item('#/search', '⌕', '검색', cur === 'search'),
       item(me ? `#/u/${encodeURIComponent(me.username)}` : '#/login', '☻', me ? '마이' : '로그인', cur === 'u' || cur === 'members' || cur === 'me' || cur === 'login' || cur === 'signup')
     );
   }
@@ -161,18 +166,24 @@ function renderHeader(path) {
       tab('#/songs', '노래', cur === 'songs'),
       tab('#/info', '정보·팁', cur === 'info'),
       tab('#/jobs', '구인구직', cur === 'jobs'),
-      tab('#/members', '멤버', cur === 'members' || cur === 'u' || cur === 'me')
+      tab('#/qna', '질문답변', cur === 'qna'),
+      tab('#/members', '멤버', cur === 'members' || cur === 'u' || cur === 'me'),
+      tab('#/search', '🔍 검색', cur === 'search')
     )
   );
 }
 
 /* ───────── 카드 ───────── */
-function postCard(p) {
+function postCard(p, { showType = false } = {}) {
   const meta = [h('span', null, p.author.username), h('span', null, ago(p.created_at))];
   if (p.like_count) meta.push(h('span', null, `♥ ${p.like_count}`));
   if (p.comment_count) meta.push(h('span', null, `💬 ${p.comment_count}`));
   const chips = [];
-  if (p.type === 'song') {
+  if (showType) chips.push(h('span', { class: 'chip' }, TYPES[p.type].label));
+  if (p.type === 'qna') {
+    chips.push(h('span', { class: 'chip acc' }, p.extra.category || '기타'));
+    chips.push(h('span', { class: 'chip ' + (p.closed ? 'pink' : 'warn') }, p.closed ? '✔ 해결됨' : '답변 기다리는 중'));
+  } else if (p.type === 'song') {
     chips.push(h('span', { class: 'chip acc' }, SONG_KINDS[p.extra.kind] || '노래'));
     if (p.extra.vocal) chips.push(h('span', { class: 'chip' }, `보컬 ${p.extra.vocal}`));
     if (p.extra.genre) chips.push(h('span', { class: 'chip' }, p.extra.genre));
@@ -185,17 +196,17 @@ function postCard(p) {
     if (p.closed) chips.push(h('span', { class: 'chip' }, '마감'));
     else if (p.extra.deadline) chips.push(h('span', { class: 'chip' }, `~${p.extra.deadline}`));
   }
+  const main = [h('div', { class: 'title' }, p.title), h('div', { class: 'chips' }, chips), h('div', { class: 'meta' }, meta)];
   return h(
     'a',
-    { class: 'card' + (p.closed ? ' closed' : ''), href: `#/post/${p.id}` },
-    h('div', { class: 'title' }, p.title),
-    h('div', { class: 'chips' }, chips),
-    h('div', { class: 'meta' }, meta)
+    { class: 'card' + (p.closed && p.type === 'job' ? ' closed' : '') + (p.thumb ? ' has-thumb' : ''), href: `#/post/${p.id}` },
+    p.thumb ? h('img', { class: 'thumb', src: imgUrl(p.thumb), alt: '', loading: 'lazy' }) : null,
+    p.thumb ? h('div', { class: 'card-main' }, main) : main
   );
 }
 
-const cards = (items, empty = '아직 글이 없어요.') =>
-  items.length ? h('div', { class: 'cards' }, items.map(postCard)) : h('div', { class: 'empty' }, empty);
+const cards = (items, empty = '아직 글이 없어요.', opts) =>
+  items.length ? h('div', { class: 'cards' }, items.map((p) => postCard(p, opts))) : h('div', { class: 'empty' }, empty);
 
 /* ───────── 홈 ───────── */
 function dday(deadline) {
@@ -211,7 +222,13 @@ function projectCard(p) {
   return h(
     'a',
     { class: 'card project', href: `#/post/${p.id}` },
-    h('div', { class: 'cover c' + (p.id % 3) }, h('span', { class: 'status' }, JOB_KINDS[ex.kind] === '구직' ? '구직' : '모집중'), h('span', { class: 'symbol', 'aria-hidden': 'true' }, '♫')),
+    h(
+      'div',
+      { class: 'cover c' + (p.id % 3) },
+      p.thumb ? h('img', { class: 'cover-img', src: imgUrl(p.thumb), alt: '', loading: 'lazy' }) : null,
+      h('span', { class: 'status' }, JOB_KINDS[ex.kind] === '구직' ? '구직' : '모집중'),
+      p.thumb ? null : h('span', { class: 'symbol', 'aria-hidden': 'true' }, '♫')
+    ),
     h(
       'div',
       { class: 'pbody' },
@@ -227,7 +244,9 @@ function workCard(p) {
   return h(
     'a',
     { class: 'card work', href: `#/post/${p.id}` },
-    h('div', { class: 'work-icon', 'aria-hidden': 'true' }, ['♫', '◉', '♪', '♬'][p.id % 4]),
+    p.thumb
+      ? h('img', { class: 'work-thumb', src: imgUrl(p.thumb), alt: '', loading: 'lazy' })
+      : h('div', { class: 'work-icon', 'aria-hidden': 'true' }, ['♫', '◉', '♪', '♬'][p.id % 4]),
     h('div', { class: 'title' }, p.title),
     h('div', { class: 'muted small' }, '@' + p.author.username)
   );
@@ -281,6 +300,12 @@ async function pageHome() {
     h(
       'section',
       { class: 'section' },
+      head('💬 질문답변', '막히는 게 있으면 물어보고, 아는 건 같이 답해 줘요.', typeLink('qna'), '더 보기 →'),
+      cards(d.qna.slice(0, 4), '첫 질문을 기다리고 있어요!')
+    ),
+    h(
+      'section',
+      { class: 'section' },
       h('div', { class: 'section-head' }, h('h2', null, '이음크루에서 할 수 있는 것')),
       h('div', { class: 'features' }, FEATURES.map(([ic, t, p]) => h('article', { class: 'feature' }, h('div', { class: 'ficon', 'aria-hidden': 'true' }, ic), h('h3', null, t), h('p', { class: 'muted small' }, p))))
     )
@@ -321,6 +346,17 @@ async function pageList(type, query) {
     );
   if (type === 'song') filters.push(chipRow('종류', 'kind', Object.entries(SONG_KINDS)));
   if (type === 'info') filters.push(chipRow('분류', 'category', INFO_CATEGORIES.map((c) => [c, c])));
+  if (type === 'qna') {
+    filters.push(chipRow('분류', 'category', INFO_CATEGORIES.map((c) => [c, c])));
+    filters.push(
+      h(
+        'label',
+        { class: 'check' },
+        h('input', { type: 'checkbox', checked: query.get('open') === '1', onchange: (e) => nav({ open: e.target.checked ? '1' : '' }) }),
+        '아직 해결 안 된 질문만'
+      )
+    );
+  }
   if (type === 'job') {
     filters.push(chipRow('구분', 'kind', Object.entries(JOB_KINDS)));
     filters.push(chipRow('분야', 'role', ROLES.map((r) => [r, r])));
@@ -365,8 +401,10 @@ async function pageList(type, query) {
       h('a', { class: 'btn primary', href: me ? `#/write/${type}` : '#/login?next=' + encodeURIComponent(`#/write/${type}`) }, T.write)
     ),
     type === 'job' ? h('div', { class: 'notice' }, '이 게시판은 무페이 합작 전용이에요. 크레딧 표기나 수익 배분 여부는 글에 꼭 적어 주세요.') : null,
+    type === 'qna' ? h('p', { class: 'muted small' }, '작곡·조교·믹싱 등 궁금한 걸 물어보고, 아는 건 댓글로 같이 답해 주세요. 질문자는 해결되면 "해결됨"으로 표시할 수 있어요.') : null,
     h('div', { class: 'filters' }, filters, tagNote, h('div', { class: 'row between' }, h('span', { class: 'muted small' }, `총 ${d.total}개`), sort)),
-    cards(d.items, '조건에 맞는 글이 없어요.'),
+    query.get('q') ? h('p', { class: 'small' }, h('a', { href: `#/search?q=${encodeURIComponent(query.get('q'))}` }, '다른 게시판·멤버에서도 찾아보기 →')) : null,
+    cards(d.items, query.get('q') ? '검색 결과가 없어요. 낱말을 줄이거나 다른 말로 찾아 보세요.' : '조건에 맞는 글이 없어요.'),
     pager
   );
 }
@@ -411,6 +449,8 @@ async function pagePost(id) {
     details.push(kv([['종류', SONG_KINDS[p.extra.kind]], ['보컬', p.extra.vocal], ['장르', p.extra.genre], ['링크', yid ? linkEl(p.url) : null]]));
   } else if (p.type === 'info') {
     details.push(kv([['분류', p.extra.category], ['참고 링크', p.url ? linkEl(p.url) : null]]));
+  } else if (p.type === 'qna') {
+    details.push(kv([['분류', p.extra.category], ['상태', p.closed ? '✔ 해결됨' : '답변 기다리는 중'], ['참고 링크', p.url ? linkEl(p.url) : null]]));
   } else {
     details.push(
       h('div', { class: 'notice' }, '무페이 합작 글이에요. 크레딧·수익 배분은 글쓴이와 직접 정해 주세요.'),
@@ -428,20 +468,21 @@ async function pagePost(id) {
 
   const actions = [likeBtn];
   if (canEdit) {
-    if (p.type === 'job') {
+    if (p.type === 'job' || p.type === 'qna') {
+      const isQ = p.type === 'qna';
       actions.push(
         h('button', {
           class: 'btn sm',
           onclick: async () => {
             try {
               await api('PUT', `/api/posts/${id}`, { ...p, closed: !p.closed });
-              toast(p.closed ? '다시 모집해요.' : '마감 처리했어요.');
+              toast(isQ ? (p.closed ? '해결 표시를 뺐어요.' : '해결됨으로 표시했어요.') : p.closed ? '다시 모집해요.' : '마감 처리했어요.');
               render();
             } catch (e) {
               toast(e.message, true);
             }
           },
-        }, p.closed ? '다시 열기' : '마감하기')
+        }, isQ ? (p.closed ? '해결 취소' : '✔ 해결됨으로 표시') : p.closed ? '다시 열기' : '마감하기')
       );
     }
     actions.push(
@@ -463,7 +504,14 @@ async function pagePost(id) {
   }
 
   const commentsBox = h('div', { id: 'comments' });
-  loadComments(id, commentsBox);
+  loadComments(id, commentsBox, p.type === 'qna');
+  const gallery = p.images.length
+    ? h(
+        'div',
+        { class: 'gallery' + (p.images.length === 1 ? ' one' : '') },
+        p.images.map((iid) => h('a', { href: imgUrl(iid), target: '_blank', rel: 'noopener noreferrer', 'aria-label': '사진 크게 보기' }, h('img', { src: imgUrl(iid), alt: `${p.title} 사진`, loading: 'lazy' })))
+      )
+    : null;
 
   return h(
     'article',
@@ -477,66 +525,205 @@ async function pagePost(id) {
     ),
     media,
     details,
+    gallery,
     p.body ? h('div', { class: 'body' }, p.body) : null,
     tags ? h('div', { class: 'stack' }, h('div'), tags) : null,
     h('div', { class: 'row' }, actions),
-    h('h2', { class: 'section-head' }, '댓글'),
+    h('h2', { class: 'section-head' }, p.type === 'qna' ? '답변' : '댓글'),
     commentsBox
   );
 }
 
-async function loadComments(postId, box) {
+/* 댓글 입력 폼 (새 댓글 / 답글 공용). forceSecret: 비밀 댓글에 다는 답글은 항상 비밀 */
+function commentForm({ postId, parentId = null, placeholder, forceSecret = false, initial = '', onDone, onCancel }) {
+  const ta = h('textarea', { maxlength: 1000, placeholder, 'aria-label': parentId ? '답글' : '댓글', value: initial });
+  const secret = h('input', { type: 'checkbox', checked: forceSecret, disabled: forceSecret });
+  const err = h('div', { class: 'err' });
+  const btn = h('button', { class: 'btn primary' + (parentId ? ' sm' : ''), type: 'submit' }, parentId ? '답글 쓰기' : '댓글 쓰기');
+  return h(
+    'form',
+    {
+      class: 'stack' + (parentId ? ' reply-form' : ''),
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = '';
+        btn.disabled = true;
+        try {
+          await api('POST', `/api/posts/${postId}/comments`, { body: ta.value, parent_id: parentId, secret: secret.checked });
+          onDone();
+        } catch (er) {
+          err.textContent = er.message;
+          btn.disabled = false;
+        }
+      },
+    },
+    ta,
+    h('label', { class: 'check small' }, secret, forceSecret ? '🔒 비밀 댓글의 답글이라 비밀로 남아요' : '🔒 비밀 댓글 (글쓴이와 나만 볼 수 있어요)'),
+    err,
+    h('div', { class: 'row' }, btn, onCancel ? h('button', { class: 'btn sm ghost', type: 'button', onclick: onCancel }, '취소') : null)
+  );
+}
+
+async function loadComments(postId, box, isQna = false) {
   try {
     const { comments } = await api('GET', `/api/posts/${postId}/comments`);
-    const list = comments.map((c) =>
-      h(
+    const reload = () => loadComments(postId, box, isQna);
+    const replies = new Map();
+    for (const c of comments) if (c.parent_id) (replies.get(c.parent_id) || replies.set(c.parent_id, []).get(c.parent_id)).push(c);
+    const roots = comments.filter((c) => !c.parent_id || !comments.some((x) => x.id === c.parent_id));
+
+    const renderOne = (c, root) => {
+      const isReply = c !== root;
+      const slot = h('div');
+      const canReply = me && !c.hidden;
+      const who = h(
         'div',
-        { class: 'comment' },
-        h('div', { class: 'who row' }, h('a', { href: `#/u/${encodeURIComponent(c.author.username)}` }, c.author.username), h('span', null, ago(c.created_at)),
-          me && (me.id === c.author.id || me.is_admin)
-            ? h('button', {
-                class: 'btn sm ghost danger',
-                onclick: async () => {
-                  if (!confirm('댓글을 삭제할까요?')) return;
-                  try {
-                    await api('DELETE', `/api/comments/${c.id}`);
-                    loadComments(postId, box);
-                  } catch (e) {
-                    toast(e.message, true);
-                  }
-                },
-              }, '삭제')
-            : null),
-        h('p', null, c.body)
-      )
-    );
-    const ta = h('textarea', { maxlength: 1000, placeholder: '댓글을 남겨 보세요', 'aria-label': '댓글' });
-    const err = h('div', { class: 'err' });
+        { class: 'who row' },
+        c.hidden ? h('span', null, ago(c.created_at)) : h('a', { href: `#/u/${encodeURIComponent(c.author.username)}` }, c.author.username),
+        c.hidden ? null : h('span', null, ago(c.created_at)),
+        c.secret ? h('span', { class: 'chip warn' }, '🔒 비밀') : null,
+        canReply
+          ? h('button', {
+              class: 'btn sm ghost',
+              onclick: () =>
+                slot.firstChild
+                  ? slot.replaceChildren()
+                  : slot.replaceChildren(
+                      commentForm({
+                        postId,
+                        parentId: c.id,
+                        placeholder: '답글을 남겨 보세요',
+                        forceSecret: root.secret,
+                        initial: isReply ? `@${c.author.username} ` : '',
+                        onDone: reload,
+                        onCancel: () => slot.replaceChildren(),
+                      })
+                    ),
+            }, '답글')
+          : null,
+        me && !c.hidden && (me.id === c.author.id || me.is_admin)
+          ? h('button', {
+              class: 'btn sm ghost danger',
+              onclick: async () => {
+                const hasReplies = !isReply && (replies.get(c.id) || []).length;
+                if (!confirm(hasReplies ? '댓글을 삭제할까요? 달린 답글도 함께 지워져요.' : '삭제할까요?')) return;
+                try {
+                  await api('DELETE', `/api/comments/${c.id}`);
+                  reload();
+                } catch (e) {
+                  toast(e.message, true);
+                }
+              },
+            }, '삭제')
+          : null
+      );
+      return h(
+        'div',
+        { class: 'comment' + (isReply ? ' reply' : '') },
+        who,
+        c.hidden ? h('p', { class: 'muted secret-note' }, '🔒 비밀 댓글이에요. 글쓴이와 댓글 쓴 사람만 볼 수 있어요.') : h('p', null, c.body),
+        slot
+      );
+    };
+
+    const list = roots.map((root) => h('div', { class: 'thread' }, renderOne(root, root), (replies.get(root.id) || []).map((r) => renderOne(r, root))));
     const form = me
-      ? h(
-          'form',
-          {
-            class: 'stack',
-            onsubmit: async (e) => {
-              e.preventDefault();
-              err.textContent = '';
-              try {
-                await api('POST', `/api/posts/${postId}/comments`, { body: ta.value });
-                loadComments(postId, box);
-              } catch (er) {
-                err.textContent = er.message;
-              }
-            },
-          },
-          ta,
-          err,
-          h('button', { class: 'btn primary', type: 'submit' }, '댓글 쓰기')
-        )
+      ? commentForm({ postId, placeholder: isQna ? '답변이나 댓글을 남겨 보세요' : '댓글을 남겨 보세요', onDone: reload })
       : h('p', { class: 'muted' }, h('a', { href: '#/login?next=' + encodeURIComponent(`#/post/${postId}`) }, '로그인'), '하면 댓글을 쓸 수 있어요.');
-    box.replaceChildren(...(list.length ? list : [h('p', { class: 'muted' }, '첫 댓글을 남겨 보세요.')]), form);
+    box.replaceChildren(...(list.length ? list : [h('p', { class: 'muted' }, isQna ? '아직 답변이 없어요. 아는 만큼 도와 주세요!' : '첫 댓글을 남겨 보세요.')]), form);
   } catch (e) {
     box.replaceChildren(h('p', { class: 'err' }, e.message));
   }
+}
+
+/* ───────── 사진 올리기 ───────── */
+/* 브라우저에서 긴 변 1280px 이하 JPEG로 줄인 뒤 올려요 (서버 저장 공간 절약 + 업로드 빠르게) */
+async function shrinkImage(file) {
+  let bmp;
+  try {
+    bmp = await createImageBitmap(file);
+  } catch {
+    throw new Error('이 사진은 열 수 없어요. JPG, PNG, GIF, WebP 사진을 올려 주세요.');
+  }
+  const scale = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const hgt = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = hgt;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; // 투명 PNG가 검게 나오지 않게
+  ctx.fillRect(0, 0, w, hgt);
+  ctx.drawImage(bmp, 0, 0, w, hgt);
+  if (bmp.close) bmp.close();
+  let quality = 0.86;
+  let data = canvas.toDataURL('image/jpeg', quality);
+  while (data.length > 1.9 * 1024 * 1024 && quality > 0.45) {
+    quality -= 0.1;
+    data = canvas.toDataURL('image/jpeg', quality);
+  }
+  return data;
+}
+
+function imagePicker(initialIds = [], initialThumb = null) {
+  let ids = [...initialIds];
+  let thumb = ids.includes(initialThumb) ? initialThumb : ids[0] ?? null;
+  let busy = 0;
+  const tiles = h('div', { class: 'tiles' });
+  const msg = h('div', { class: 'hint' });
+  const input = h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'sr-only', 'aria-label': '사진 고르기' });
+  const addBtn = h('button', { class: 'btn sm', type: 'button', onclick: () => input.click() }, '+ 사진 추가');
+
+  const draw = () => {
+    if (!ids.includes(thumb)) thumb = ids[0] ?? null;
+    tiles.replaceChildren(
+      ...ids.map((id) =>
+        h(
+          'div',
+          { class: 'tile' + (id === thumb ? ' is-thumb' : '') },
+          h('img', { src: imgUrl(id), alt: '올린 사진' }),
+          h(
+            'div',
+            { class: 'tile-btns' },
+            h('button', { class: 'btn sm' + (id === thumb ? ' primary' : ''), type: 'button', onclick: () => ((thumb = id), draw()) }, id === thumb ? '✓ 대표' : '대표로'),
+            h('button', { class: 'btn sm ghost danger', type: 'button', 'aria-label': '사진 빼기', onclick: () => ((ids = ids.filter((x) => x !== id)), draw()) }, '✕')
+          )
+        )
+      ),
+      ...(busy ? [h('div', { class: 'tile loading' }, '올리는 중…')] : [])
+    );
+    addBtn.disabled = ids.length + busy >= MAX_IMAGES;
+    msg.textContent = ids.length
+      ? '“대표”로 고른 사진이 목록 썸네일로 쓰여요. 글을 저장해야 사진이 반영돼요.'
+      : '사진은 자동으로 줄여서 올려요. JPG·PNG·GIF·WebP 가능.';
+  };
+
+  input.addEventListener('change', async () => {
+    const files = [...input.files].slice(0, MAX_IMAGES - ids.length - busy);
+    input.value = '';
+    if (!files.length) return toast(`사진은 최대 ${MAX_IMAGES}장까지예요.`, true);
+    for (const file of files) {
+      busy++;
+      draw();
+      try {
+        const data = await shrinkImage(file);
+        const r = await api('POST', '/api/images', { data });
+        ids.push(r.id);
+        if (thumb === null) thumb = r.id;
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        busy--;
+        draw();
+      }
+    }
+  });
+  draw();
+  return {
+    el: h('div', { class: 'img-picker' }, tiles, h('div', { class: 'row' }, addBtn, input), msg),
+    value: () => ({ images: ids, thumb }),
+    uploading: () => busy > 0,
+  };
 }
 
 /* ───────── 글쓰기/수정 ───────── */
@@ -577,6 +764,12 @@ async function pageWrite(type, editId) {
       field('body', '내용', h('textarea', { id: 'f-body', maxlength: 10000, value: post.body, required: true })),
       field('url', '참고 링크 (선택)', inp('url', { type: 'url', maxlength: 500, value: post.url }))
     );
+  } else if (type === 'qna') {
+    fields.push(
+      field('category', '분류', sel('category', INFO_CATEGORIES.map((c) => [c, c]), ex.category || '기타')),
+      field('body', '질문 내용', h('textarea', { id: 'f-body', maxlength: 10000, value: post.body, required: true, placeholder: '어떤 상황인지, 지금까지 해 본 것, 어떤 도움이 필요한지 적어 주세요. 사용하는 프로그램 이름도 있으면 좋아요.' })),
+      field('url', '참고 링크 (선택)', inp('url', { type: 'url', maxlength: 500, value: post.url }), '막힌 부분을 보여 주는 영상·곡 링크 등')
+    );
   } else {
     fields.push(
       h('div', { class: 'notice' }, '무페이 합작 전용 게시판이에요. 크레딧 표기와 수익 배분 여부를 꼭 적어 주세요.'),
@@ -593,7 +786,9 @@ async function pageWrite(type, editId) {
       fields.push(h('label', { class: 'check', for: 'f-closed' }, f.closed, '마감 처리'));
     }
   }
+  const picker = imagePicker(post.images || [], post.thumb);
   fields.push(field('tags', '태그 (선택)', inp('tags', { value: post.tags.join(', '), placeholder: '쉼표로 구분, 최대 5개' })));
+  fields.push(h('div', { class: 'field' }, h('label', null, `사진 (선택, 최대 ${MAX_IMAGES}장)`), picker.el));
 
   const err = h('div', { class: 'err' });
   const submit = h('button', { class: 'btn primary', type: 'submit' }, editId ? '저장' : '올리기');
@@ -604,15 +799,30 @@ async function pageWrite(type, editId) {
       onsubmit: async (e) => {
         e.preventDefault();
         err.textContent = '';
+        if (picker.uploading()) {
+          err.textContent = '사진을 올리는 중이에요. 잠깐만 기다려 주세요.';
+          return;
+        }
         submit.disabled = true;
         const val = (k) => (f[k] ? f[k].value : '');
         const extra =
           type === 'song'
             ? { kind: val('kind'), vocal: val('vocal'), genre: val('genre') }
-            : type === 'info'
+            : type === 'info' || type === 'qna'
             ? { category: val('category') }
             : { kind: val('kind'), role: val('role'), contact: val('contact'), credit: val('credit'), deadline: val('deadline') };
-        const payload = { type, title: val('title'), body: val('body'), url: val('url'), tags: val('tags'), extra, closed: f.closed ? f.closed.checked : false };
+        const pics = picker.value();
+        const payload = {
+          type,
+          title: val('title'),
+          body: val('body'),
+          url: val('url'),
+          tags: val('tags'),
+          extra,
+          images: pics.images,
+          thumb: pics.thumb,
+          closed: f.closed ? f.closed.checked : !!(editId && type === 'qna' && post.closed),
+        };
         try {
           const r = editId ? await api('PUT', `/api/posts/${editId}`, payload) : await api('POST', '/api/posts', payload);
           toast(editId ? '저장했어요.' : '올렸어요!');
@@ -786,6 +996,105 @@ async function pageEditProfile() {
   );
 }
 
+/* ───────── 검색 ───────── */
+function memberCard(m) {
+  return h(
+    'a',
+    { class: 'card', href: `#/u/${encodeURIComponent(m.username)}` },
+    h(
+      'div',
+      { class: 'member' },
+      avatar(m.username, true),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', { class: 'title' }, m.username),
+        h('div', { class: 'chips' }, m.open_to_work ? h('span', { class: 'chip pink' }, '합작 가능') : null, m.roles.map((r) => h('span', { class: 'chip acc' }, r))),
+        h('div', { class: 'meta' }, h('span', null, `노래 ${m.song_count}`), m.bio ? h('span', null, m.bio.slice(0, 40) + (m.bio.length > 40 ? '…' : '')) : null)
+      )
+    )
+  );
+}
+
+async function pageSearch(query) {
+  const text = (query.get('q') || '').trim();
+  const type = query.get('type') || ''; // '' = 전체, song/info/job/qna/members
+  const nav = (patch) => {
+    const n = new URLSearchParams(query);
+    for (const [k, v] of Object.entries(patch)) v ? n.set(k, v) : n.delete(k);
+    if (!('page' in patch)) n.delete('page');
+    go('#/search?' + n.toString());
+  };
+  const input = h('input', { type: 'search', placeholder: '제목, 내용, 태그, 닉네임, 보컬로이드 이름…', value: text, maxlength: 50, 'aria-label': '검색어' });
+  const form = h(
+    'form',
+    { class: 'row', onsubmit: (e) => (e.preventDefault(), go('#/search' + (input.value.trim() ? `?q=${encodeURIComponent(input.value.trim())}` : ''))) },
+    h('div', { class: 'grow' }, input),
+    h('button', { class: 'btn primary', type: 'submit' }, '검색')
+  );
+  const head = h('div', null, h('h1', null, '검색'), form);
+  if (!text) {
+    setTimeout(() => input.focus(), 0);
+    return h(
+      'div',
+      null,
+      head,
+      h('div', { class: 'empty' }, '노래·정보·구인구직·질문과 멤버를 한 번에 찾아요.', h('br'), '낱말을 띄어 쓰면 모두 들어 있는 글만 나와요. (예: ', h('b', null, '조교 우타우'), ')')
+    );
+  }
+
+  const postParams = new URLSearchParams({ q: text });
+  if (type && type !== 'members') postParams.set('type', type);
+  if (query.get('page')) postParams.set('page', query.get('page'));
+  const [d, mem] = await Promise.all([api('GET', '/api/posts?' + postParams), api('GET', '/api/members?' + new URLSearchParams({ q: text }))]);
+  const c = d.counts || { song: 0, info: 0, job: 0, qna: 0 };
+  const all = c.song + c.info + c.job + c.qna;
+  const tabs = [
+    ['', '전체', all],
+    ['song', '노래', c.song],
+    ['info', '정보·팁', c.info],
+    ['job', '구인구직', c.job],
+    ['qna', '질문답변', c.qna],
+    ['members', '멤버', mem.members.length],
+  ];
+  const tabRow = h(
+    'div',
+    { class: 'chips', role: 'group', 'aria-label': '검색 범위' },
+    tabs.map(([val, label, n]) => h('button', { class: 'chip btnlike' + (type === val ? ' on' : ''), onclick: () => nav({ type: val }) }, `${label} ${n}`))
+  );
+
+  let body;
+  if (type === 'members') {
+    body = mem.members.length ? h('div', { class: 'cards' }, mem.members.map(memberCard)) : h('div', { class: 'empty' }, '맞는 멤버가 없어요.');
+  } else {
+    const pager =
+      d.pages > 1
+        ? h(
+            'div',
+            { class: 'pager' },
+            h('button', { class: 'btn sm', disabled: d.page <= 1, onclick: () => nav({ page: String(d.page - 1) }) }, '이전'),
+            h('span', { class: 'muted' }, `${d.page} / ${d.pages}`),
+            h('button', { class: 'btn sm', disabled: d.page >= d.pages, onclick: () => nav({ page: String(d.page + 1) }) }, '다음')
+          )
+        : null;
+    body = h(
+      'div',
+      { class: 'stack' },
+      cards(d.items, '', { showType: !type }),
+      pager,
+      !type && d.page === 1 && mem.members.length
+        ? h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', null, `멤버 ${mem.members.length}`), h('a', { class: 'more', href: '#/search?' + new URLSearchParams({ q: text, type: 'members' }) }, '모두 보기 →')), h('div', { class: 'cards' }, mem.members.slice(0, 3).map(memberCard)))
+        : null
+    );
+    if (!d.items.length && !(!type && mem.members.length)) {
+      body = h('div', { class: 'empty' }, `“${text}”에 맞는 결과가 없어요.`, h('br'), '낱말을 줄이거나, 띄어쓰기를 빼고 다시 찾아 보세요.');
+    } else if (!d.items.length) {
+      body = h('div', { class: 'stack' }, h('div', { class: 'empty' }, '맞는 글은 없고, 멤버만 찾았어요.'), body);
+    }
+  }
+  return h('div', null, head, h('div', { class: 'filters' }, tabRow), body);
+}
+
 /* ───────── 멤버 목록 ───────── */
 async function pageMembers(query) {
   const params = new URLSearchParams();
@@ -817,24 +1126,7 @@ async function pageMembers(query) {
       ? h(
           'div',
           { class: 'cards' },
-          members.map((m) =>
-            h(
-              'a',
-              { class: 'card', href: `#/u/${encodeURIComponent(m.username)}` },
-              h(
-                'div',
-                { class: 'member' },
-                avatar(m.username, true),
-                h(
-                'div',
-                { class: 'grow' },
-                h('div', { class: 'title' }, m.username),
-                h('div', { class: 'chips' }, m.open_to_work ? h('span', { class: 'chip pink' }, '합작 가능') : null, m.roles.map((r) => h('span', { class: 'chip acc' }, r))),
-                h('div', { class: 'meta' }, h('span', null, `노래 ${m.song_count}`), m.bio ? h('span', null, m.bio.slice(0, 40) + (m.bio.length > 40 ? '…' : '')) : null)
-                )
-              )
-            )
-          )
+          members.map(memberCard)
         )
       : h('div', { class: 'empty' }, '조건에 맞는 멤버가 없어요.')
   );
@@ -857,14 +1149,15 @@ async function render() {
   try {
     let node;
     if (path === '/') node = await pageHome();
-    else if ((m = path.match(/^\/(songs|info|jobs)$/))) node = await pageList(PATH_TO_TYPE[m[1]], query);
+    else if ((m = path.match(/^\/(songs|info|jobs|qna)$/))) node = await pageList(PATH_TO_TYPE[m[1]], query);
     else if ((m = path.match(/^\/post\/(\d+)$/))) node = await pagePost(m[1]);
-    else if ((m = path.match(/^\/write\/(song|info|job)$/))) node = await pageWrite(m[1], null);
+    else if ((m = path.match(/^\/write\/(song|info|job|qna)$/))) node = await pageWrite(m[1], null);
     else if ((m = path.match(/^\/edit\/(\d+)$/))) node = await pageWrite(null, m[1]);
     else if (path === '/login') node = pageAuth('login', query);
     else if (path === '/signup') node = pageAuth('signup', query);
     else if (path === '/me') node = await pageEditProfile();
     else if (path === '/members') node = await pageMembers(query);
+    else if (path === '/search') node = await pageSearch(query);
     else if ((m = path.match(/^\/u\/([^/]+)$/))) node = await pageProfile(decodeURIComponent(m[1]));
     else node = h('p', { class: 'muted center pad' }, '없는 페이지예요. ', h('a', { href: '#/' }, '홈으로'));
     if (seq !== renderSeq) return; // 더 최근 이동이 있으면 무시

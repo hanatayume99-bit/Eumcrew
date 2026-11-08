@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS posts (
   views INTEGER NOT NULL DEFAULT 0,
   closed INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  images TEXT NOT NULL DEFAULT '[]',
+  thumb_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_posts_type_created ON posts(type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
@@ -62,9 +64,21 @@ CREATE TABLE IF NOT EXISTS comments (
   post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   body TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  parent_id INTEGER,
+  is_secret INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at);
+
+CREATE TABLE IF NOT EXISTS images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  post_id INTEGER,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_images_post ON images(post_id);
 
 CREATE TABLE IF NOT EXISTS likes (
   post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -82,7 +96,20 @@ const q = (sql) => ({
     return { changes: r.rowsAffected, lastInsertRowid: r.lastInsertRowid };
   },
 });
-const ready = db.executeMultiple(SCHEMA);
+/* 이미 운영 중인 DB(예전 버전으로 만든 테이블)에는 새 칸만 덧붙여요. 기존 글·댓글은 그대로 남아요. */
+async function addColumn(table, name, ddl) {
+  const cols = (await db.execute(`PRAGMA table_info(${table})`)).rows;
+  if (!cols.some((c) => c.name === name)) await db.execute(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+}
+async function migrate() {
+  await db.executeMultiple(SCHEMA);
+  await addColumn('posts', 'images', `TEXT NOT NULL DEFAULT '[]'`);
+  await addColumn('posts', 'thumb_id', 'INTEGER');
+  await addColumn('comments', 'parent_id', 'INTEGER');
+  await addColumn('comments', 'is_secret', 'INTEGER NOT NULL DEFAULT 0');
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)');
+}
+const ready = migrate();
 const now = () => Date.now();
 
 /* ───────────── 공통 유틸 ───────────── */
@@ -180,6 +207,8 @@ setInterval(async () => {
   for (const [k, v] of hits) if (t - v.start > 60 * 60 * 1000) hits.delete(k);
   try {
     await q('DELETE FROM sessions WHERE expires_at < ?').run(t);
+    // 올려 놓고 글에 붙이지 않은 사진은 하루 뒤 정리
+    await q('DELETE FROM images WHERE post_id IS NULL AND created_at < ?').run(t - 24 * 60 * 60 * 1000);
   } catch (e) {
     console.error(e);
   }
@@ -225,7 +254,20 @@ function cleanTags(v) {
 
 const SONG_KINDS = ['original', 'cover', 'collab', 'remix'];
 const JOB_KINDS = ['hire', 'seek'];
-const INFO_CATEGORIES = ['작곡', '작사', '믹싱/마스터링', '보컬', '일러스트', '영상', '합작/행사', '기타'];
+const INFO_CATEGORIES = ['작곡', '작사', '편곡', '조교', '믹싱/마스터링', '보컬', '일러스트', '영상', '합작/행사', '기타'];
+const POST_TYPES = ['song', 'info', 'job', 'qna'];
+const MAX_IMAGES = 6;
+const IMG_MAX_BYTES = 1.5 * 1024 * 1024;
+
+/* 질문답변(qna)은 DB에는 type='info' + extra.qna=1 로 저장해요.
+   예전 DB의 posts 표는 type 허용값이 고정돼 있어서, 표를 갈아엎지 않고도(= 기존 데이터 위험 없이) 쓰려는 방법이에요. */
+const storedType = (type) => (type === 'qna' ? 'info' : type);
+const typeWhere = (type) =>
+  type === 'qna'
+    ? `(p.type = 'info' AND json_extract(p.extra, '$.qna') = 1)`
+    : type === 'info'
+    ? `(p.type = 'info' AND COALESCE(json_extract(p.extra, '$.qna'), 0) = 0)`
+    : `p.type = '${type === 'song' ? 'song' : 'job'}'`;
 
 function validatePost(type, b) {
   const post = { title: str(b.title, '제목', { required: true, max: 100 }), tags: cleanTags(b.tags) };
@@ -242,6 +284,12 @@ function validatePost(type, b) {
     const category = ex.category || '기타';
     if (!INFO_CATEGORIES.includes(category)) throw bad('분류가 올바르지 않아요.');
     post.extra = { category };
+  } else if (type === 'qna') {
+    post.url = cleanUrl(b.url, '참고 링크');
+    post.body = str(b.body, '질문 내용', { required: true, max: 10000 });
+    const category = ex.category || '기타';
+    if (!INFO_CATEGORIES.includes(category)) throw bad('분류가 올바르지 않아요.');
+    post.extra = { qna: 1, category };
   } else {
     post.url = cleanUrl(b.url, '참고 링크(포트폴리오 등)');
     post.body = str(b.body, '상세 내용', { required: true, max: 10000 });
@@ -282,15 +330,21 @@ function publicUser(u) {
   };
 }
 
+const typeOf = (r) => (r.type === 'info' && parseJson(r.extra, {}).qna ? 'qna' : r.type);
+
 function postView(r) {
+  const images = parseJson(r.images, []);
+  const thumb = images.includes(Number(r.thumb_id)) ? Number(r.thumb_id) : images[0] ?? null;
   return {
     id: Number(r.id),
-    type: r.type,
+    type: typeOf(r),
     title: r.title,
     body: r.body,
     url: r.url,
     tags: parseJson(r.tags, []),
     extra: parseJson(r.extra, {}),
+    images,
+    thumb,
     views: r.views,
     closed: !!r.closed,
     created_at: r.created_at,
@@ -310,6 +364,55 @@ const POST_SELECT = `
   FROM posts p JOIN users u ON u.id = p.user_id`;
 
 const escLike = (s) => s.replace(/[\\%_]/g, (m) => '\\' + m);
+
+/* 검색 대상: 제목·본문·태그·글쓴이·보컬·장르·분야·분류를 한 덩어리로 보고, 띄어쓰기로 나눈 낱말이 모두 들어 있으면 일치 */
+const HAYSTACK = `(p.title || ' ' || p.body || ' ' || p.tags || ' ' || u.username || ' ' ||
+  COALESCE(json_extract(p.extra, '$.vocal'), '') || ' ' || COALESCE(json_extract(p.extra, '$.genre'), '') || ' ' ||
+  COALESCE(json_extract(p.extra, '$.role'), '') || ' ' || COALESCE(json_extract(p.extra, '$.category'), ''))`;
+const searchTerms = (text) =>
+  text
+    .split(/\s+/)
+    .map((s) => s.replace(/^#+/, ''))
+    .filter(Boolean)
+    .slice(0, 5);
+
+/* ───────────── 사진 ───────────── */
+function sniffImage(buf) {
+  if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 12 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buf.length > 12 && buf.subarray(0, 4).toString('latin1') === 'GIF8') return 'image/gif';
+  if (buf.length > 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+/* 글에 붙일 사진 목록 검사. images를 안 보냈으면 null(= 기존 그대로 두기) */
+async function resolveImages(me, b, postId) {
+  if (b.images === undefined) return null;
+  if (!Array.isArray(b.images)) throw bad('사진 형식이 올바르지 않아요.');
+  if (b.images.length > MAX_IMAGES) throw bad(`사진은 최대 ${MAX_IMAGES}장까지 올릴 수 있어요.`);
+  const ids = [];
+  for (const v of b.images) {
+    const id = Number(v);
+    if (!Number.isInteger(id) || id < 1) throw bad('사진 형식이 올바르지 않아요.');
+    if (ids.includes(id)) continue;
+    const row = await q('SELECT user_id, post_id FROM images WHERE id = ?').get(id);
+    if (!row) throw bad('올라가지 않은 사진이 들어 있어요. 다시 올려 주세요.');
+    const mine = row.user_id === me.id;
+    const same = postId !== null && row.post_id === postId;
+    if (!(same || (mine && (row.post_id === null || row.post_id === undefined)))) throw bad('사용할 수 없는 사진이에요.');
+    ids.push(id);
+  }
+  let thumb = Number(b.thumb);
+  if (!ids.includes(thumb)) thumb = ids[0] ?? null;
+  return { ids, thumb };
+}
+
+async function attachImages(postId, ids) {
+  if (!ids.length) return void (await q('DELETE FROM images WHERE post_id = ?').run(postId));
+  const ph = ids.map(() => '?').join(',');
+  await q(`UPDATE images SET post_id = ? WHERE id IN (${ph})`).run(postId, ...ids);
+  await q(`DELETE FROM images WHERE post_id = ? AND id NOT IN (${ph})`).run(postId, ...ids); // 빼기로 한 사진 정리
+}
 
 /* ───────────── 인증 ───────────── */
 async function currentUser(req) {
@@ -340,7 +443,7 @@ const needLogin = (ctx) => {
 
 /* ───────────── API 라우트 ───────────── */
 const routes = [];
-const route = (method, pattern, handler) => {
+const route = (method, pattern, handler, opts = {}) => {
   const keys = [];
   const re = new RegExp(
     '^' +
@@ -350,7 +453,7 @@ const route = (method, pattern, handler) => {
       }) +
       '/?$'
   );
-  routes.push({ method, re, keys, handler });
+  routes.push({ method, re, keys, handler, limit: opts.limit });
 };
 
 /* 회원 */
@@ -442,6 +545,10 @@ route('GET', '/api/members', async (ctx) => {
     params.push(`%"${escLike(ctx.query.get('role').replace(/["\\]/g, ''))}"%`);
   }
   if (ctx.query.get('open') === '1') where.push('u.open_to_work = 1');
+  for (const term of searchTerms((ctx.query.get('q') || '').slice(0, 50))) {
+    where.push(`(u.username LIKE ? ESCAPE '\\' OR u.bio LIKE ? ESCAPE '\\' OR u.roles LIKE ? ESCAPE '\\')`);
+    params.push(`%${escLike(term)}%`, `%${escLike(term)}%`, `%${escLike(term)}%`);
+  }
   const rows = await q(
     `SELECT u.*, (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND p.type = 'song') AS song_count
      FROM users u ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -454,9 +561,9 @@ route('GET', '/api/members', async (ctx) => {
 route('GET', '/api/home', async (ctx) => {
   const uid = ctx.user ? ctx.user.id : 0;
   const out = {};
-  for (const t of ['song', 'info', 'job']) {
-    const where = t === 'job' ? `p.type = ? AND p.closed = 0` : `p.type = ?`;
-    out[t] = (await q(`${POST_SELECT} WHERE ${where} ORDER BY p.created_at DESC LIMIT 5`).all(uid, t)).map(postView);
+  for (const t of POST_TYPES) {
+    const where = t === 'job' ? `${typeWhere(t)} AND p.closed = 0` : typeWhere(t);
+    out[t] = (await q(`${POST_SELECT} WHERE ${where} ORDER BY p.created_at DESC LIMIT 5`).all(uid)).map(postView);
   }
   out.stats = {
     members: (await q('SELECT COUNT(*) AS n FROM users').get()).n,
@@ -472,15 +579,18 @@ route('GET', '/api/posts', async (ctx) => {
   const params = [];
   const type = sp.get('type');
   if (type) {
-    if (!['song', 'info', 'job'].includes(type)) throw bad('type이 올바르지 않아요.');
-    where.push('p.type = ?');
-    params.push(type);
+    if (!POST_TYPES.includes(type)) throw bad('type이 올바르지 않아요.');
+    where.push(typeWhere(type));
   }
   const text = (sp.get('q') || '').trim().slice(0, 50);
-  if (text) {
-    where.push(`(p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')`);
-    params.push(`%${escLike(text)}%`, `%${escLike(text)}%`);
+  const termWhere = [];
+  const termParams = [];
+  for (const term of searchTerms(text)) {
+    termWhere.push(`${HAYSTACK} LIKE ? ESCAPE '\\'`);
+    termParams.push(`%${escLike(term)}%`);
   }
+  where.push(...termWhere);
+  params.push(...termParams);
   const tag = (sp.get('tag') || '').replace(/["\\]/g, '').trim().slice(0, 20);
   if (tag) {
     where.push(`p.tags LIKE ? ESCAPE '\\'`);
@@ -503,18 +613,37 @@ route('GET', '/api/posts', async (ctx) => {
   }
   if (sp.get('open') === '1') where.push('p.closed = 0');
   const sort = sp.get('sort');
-  const order =
-    sort === 'popular' ? 'like_count DESC, p.created_at DESC' : sort === 'views' ? 'p.views DESC, p.created_at DESC' : 'p.created_at DESC';
+  // 검색어가 있고 정렬을 따로 고르지 않았으면, 제목에 검색어가 들어간 글을 먼저 보여 줘요
+  const byRelevance = termWhere.length && !sort;
+  const order = byRelevance
+    ? `(CASE WHEN p.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END), p.created_at DESC`
+    : sort === 'popular'
+    ? 'like_count DESC, p.created_at DESC'
+    : sort === 'views'
+    ? 'p.views DESC, p.created_at DESC'
+    : 'p.created_at DESC';
+  const orderParams = byRelevance ? [`%${escLike(text)}%`] : [];
   const page = Math.max(1, parseInt(sp.get('page'), 10) || 1);
   const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  const total = (await q(`SELECT COUNT(*) AS n FROM posts p ${whereSql}`).get(...params)).n;
+  const total = (await q(`SELECT COUNT(*) AS n FROM posts p JOIN users u ON u.id = p.user_id ${whereSql}`).get(...params)).n;
   const rows = await q(`${POST_SELECT} ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`).all(
     ctx.user ? ctx.user.id : 0,
     ...params,
+    ...orderParams,
     PAGE_SIZE,
     (page - 1) * PAGE_SIZE
   );
-  return { items: rows.map(postView), total, page, pages: Math.max(1, Math.ceil(total / PAGE_SIZE)) };
+  const out = { items: rows.map(postView), total, page, pages: Math.max(1, Math.ceil(total / PAGE_SIZE)) };
+  if (termWhere.length) {
+    // 검색 결과 탭에 보여 줄 게시판별 개수 (게시판 필터는 빼고 센다)
+    const groups = await q(
+      `SELECT p.type AS type, COALESCE(json_extract(p.extra, '$.qna'), 0) AS qna, COUNT(*) AS n
+       FROM posts p JOIN users u ON u.id = p.user_id WHERE ${termWhere.join(' AND ')} GROUP BY 1, 2`
+    ).all(...termParams);
+    out.counts = { song: 0, info: 0, job: 0, qna: 0 };
+    for (const g of groups) out.counts[g.type === 'info' && g.qna ? 'qna' : g.type] += Number(g.n);
+  }
+  return out;
 });
 
 route('GET', '/api/posts/:id', async (ctx) => {
@@ -531,14 +660,17 @@ route('POST', '/api/posts', async (ctx) => {
   const me = needLogin(ctx);
   rateLimit(ctx.req, 'post', 30, 60 * 60 * 1000);
   const type = ctx.body.type;
-  if (!['song', 'info', 'job'].includes(type)) throw bad('글 종류가 올바르지 않아요.');
+  if (!POST_TYPES.includes(type)) throw bad('글 종류가 올바르지 않아요.');
   const p = validatePost(type, ctx.body);
+  const imgs = (await resolveImages(me, ctx.body, null)) || { ids: [], thumb: null };
   const t = now();
   const info = await q(
-    `INSERT INTO posts (type, user_id, title, body, url, tags, extra, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(type, me.id, p.title, p.body, p.url, JSON.stringify(p.tags), JSON.stringify(p.extra), t, t);
-  return { status: 201, data: { id: Number(info.lastInsertRowid) } };
+    `INSERT INTO posts (type, user_id, title, body, url, tags, extra, images, thumb_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(storedType(type), me.id, p.title, p.body, p.url, JSON.stringify(p.tags), JSON.stringify(p.extra), JSON.stringify(imgs.ids), imgs.thumb, t, t);
+  const id = Number(info.lastInsertRowid);
+  if (imgs.ids.length) await attachImages(id, imgs.ids);
+  return { status: 201, data: { id } };
 });
 
 route('PUT', '/api/posts/:id', async (ctx) => {
@@ -547,18 +679,23 @@ route('PUT', '/api/posts/:id', async (ctx) => {
   const row = await q('SELECT * FROM posts WHERE id = ?').get(id);
   if (!row) throw new HttpError(404, '글을 찾을 수 없어요.');
   if (row.user_id !== me.id && !me.is_admin) throw new HttpError(403, '수정 권한이 없어요.');
-  const p = validatePost(row.type, ctx.body);
-  const closed = row.type === 'job' ? (ctx.body.closed ? 1 : 0) : 0;
-  await q('UPDATE posts SET title=?, body=?, url=?, tags=?, extra=?, closed=?, updated_at=? WHERE id=?').run(
+  const type = typeOf(row);
+  const p = validatePost(type, ctx.body);
+  const closed = type === 'job' || type === 'qna' ? (ctx.body.closed ? 1 : 0) : 0; // 구인: 마감, 질문: 해결됨
+  const imgs = await resolveImages(me, ctx.body, id); // 안 보내면 기존 사진 유지
+  await q('UPDATE posts SET title=?, body=?, url=?, tags=?, extra=?, closed=?, images=?, thumb_id=?, updated_at=? WHERE id=?').run(
     p.title,
     p.body,
     p.url,
     JSON.stringify(p.tags),
     JSON.stringify(p.extra),
     closed,
+    imgs ? JSON.stringify(imgs.ids) : row.images,
+    imgs ? imgs.thumb : row.thumb_id ?? null,
     now(),
     id
   );
+  if (imgs) await attachImages(id, imgs.ids);
   return { id };
 });
 
@@ -572,6 +709,7 @@ route('DELETE', '/api/posts/:id', async (ctx) => {
     [
       { sql: 'DELETE FROM comments WHERE post_id = ?', args: [id] },
       { sql: 'DELETE FROM likes WHERE post_id = ?', args: [id] },
+      { sql: 'DELETE FROM images WHERE post_id = ?', args: [id] },
       { sql: 'DELETE FROM posts WHERE id = ?', args: [id] },
     ],
     'write'
@@ -591,23 +729,68 @@ route('POST', '/api/posts/:id/like', async (ctx) => {
 });
 
 /* 댓글 */
+/* 비밀 댓글은 쓴 사람 · 글쓴이 · (답글이면) 원댓글 쓴 사람 · 운영진만 내용을 볼 수 있어요.
+   그 밖의 사람에게는 내용과 쓴 사람을 아예 보내지 않아요 (화면에서만 가리는 게 아니라 서버가 걸러요). */
 route('GET', '/api/posts/:id/comments', async (ctx) => {
   const id = parseInt(ctx.params.id, 10);
+  const post = await q('SELECT user_id FROM posts WHERE id = ?').get(id);
+  if (!post) throw new HttpError(404, '글을 찾을 수 없어요.');
   const rows = await q(
-    `SELECT c.id, c.body, c.created_at, c.user_id, u.username
+    `SELECT c.id, c.body, c.created_at, c.user_id, c.parent_id, c.is_secret, u.username
      FROM comments c JOIN users u ON u.id = c.user_id
      WHERE c.post_id = ? ORDER BY c.created_at ASC LIMIT 500`
   ).all(id);
-  return { comments: rows.map((r) => ({ id: Number(r.id), body: r.body, created_at: r.created_at, author: { id: r.user_id, username: r.username } })) };
+  const byId = new Map(rows.map((r) => [Number(r.id), r]));
+  const me = ctx.user;
+  return {
+    comments: rows.map((r) => {
+      const secret = !!r.is_secret;
+      const parent = r.parent_id ? byId.get(Number(r.parent_id)) : null;
+      const canSee = !secret || !!(me && (me.is_admin || me.id === r.user_id || me.id === post.user_id || (parent && me.id === parent.user_id)));
+      return {
+        id: Number(r.id),
+        parent_id: r.parent_id ? Number(r.parent_id) : null,
+        secret,
+        hidden: !canSee,
+        body: canSee ? r.body : '',
+        created_at: r.created_at,
+        author: canSee ? { id: r.user_id, username: r.username } : null,
+      };
+    }),
+  };
 });
 
 route('POST', '/api/posts/:id/comments', async (ctx) => {
   const me = needLogin(ctx);
   rateLimit(ctx.req, 'comment', 60, 60 * 60 * 1000);
   const id = parseInt(ctx.params.id, 10);
-  if (!await q('SELECT 1 FROM posts WHERE id = ?').get(id)) throw new HttpError(404, '글을 찾을 수 없어요.');
+  const post = await q('SELECT user_id FROM posts WHERE id = ?').get(id);
+  if (!post) throw new HttpError(404, '글을 찾을 수 없어요.');
   const body = str(ctx.body.body, '댓글', { required: true, max: 1000 });
-  const info = await q('INSERT INTO comments (post_id, user_id, body, created_at) VALUES (?, ?, ?, ?)').run(id, me.id, body, now());
+  let secret = !!ctx.body.secret;
+  let parentId = null;
+  if (ctx.body.parent_id !== undefined && ctx.body.parent_id !== null && ctx.body.parent_id !== '') {
+    const pid = Number(ctx.body.parent_id);
+    if (!Number.isInteger(pid) || pid < 1) throw bad('답글 대상이 올바르지 않아요.');
+    const target = await q('SELECT * FROM comments WHERE id = ? AND post_id = ?').get(pid, id);
+    if (!target) throw new HttpError(404, '답글을 달 댓글을 찾을 수 없어요.');
+    // 답글은 한 단계만: 답글에 답해도 원댓글 아래에 붙어요
+    const root = target.parent_id ? await q('SELECT * FROM comments WHERE id = ? AND post_id = ?').get(target.parent_id, id) : target;
+    if (!root) throw new HttpError(404, '답글을 달 댓글을 찾을 수 없어요.');
+    parentId = Number(root.id);
+    if (root.is_secret) {
+      if (!(me.is_admin || me.id === root.user_id || me.id === post.user_id)) throw new HttpError(403, '비밀 댓글에는 글쓴이와 댓글 쓴 사람만 답글을 달 수 있어요.');
+      secret = true; // 비밀 댓글의 답글은 항상 비밀
+    }
+  }
+  const info = await q('INSERT INTO comments (post_id, user_id, body, created_at, parent_id, is_secret) VALUES (?, ?, ?, ?, ?, ?)').run(
+    id,
+    me.id,
+    body,
+    now(),
+    parentId,
+    secret ? 1 : 0
+  );
   return { status: 201, data: { id: Number(info.lastInsertRowid) } };
 });
 
@@ -617,9 +800,44 @@ route('DELETE', '/api/comments/:id', async (ctx) => {
   const row = await q('SELECT user_id FROM comments WHERE id = ?').get(id);
   if (!row) throw new HttpError(404, '댓글을 찾을 수 없어요.');
   if (row.user_id !== me.id && !me.is_admin) throw new HttpError(403, '삭제 권한이 없어요.');
-  await q('DELETE FROM comments WHERE id = ?').run(id);
+  await q('DELETE FROM comments WHERE id = ? OR parent_id = ?').run(id, id); // 달린 답글도 함께
   return { ok: true };
 });
+
+/* 사진: 브라우저가 줄여서 보낸 이미지를 DB에 저장하고, /img/번호 로 보여 줘요 */
+route(
+  'POST',
+  '/api/images',
+  async (ctx) => {
+    const me = needLogin(ctx);
+    rateLimit(ctx.req, 'image', 60, 60 * 60 * 1000);
+    if (typeof ctx.body.data !== 'string') throw bad('사진 데이터가 없어요.');
+    const buf = Buffer.from(ctx.body.data.replace(/^data:[^,]*,/, ''), 'base64');
+    if (!buf.length) throw bad('사진 데이터가 없어요.');
+    if (buf.length > IMG_MAX_BYTES) throw new HttpError(413, '사진이 너무 커요. (1.5MB 이하)');
+    const mime = sniffImage(buf); // 보낸 쪽이 말한 형식이 아니라 실제 파일 내용으로 확인
+    if (!mime) throw bad('JPG, PNG, GIF, WebP 사진만 올릴 수 있어요.');
+    const loose = (await q('SELECT COUNT(*) AS n FROM images WHERE user_id = ? AND post_id IS NULL').get(me.id)).n;
+    if (loose >= 20) throw bad('아직 글에 붙이지 않은 사진이 너무 많아요. 글을 먼저 올려 주세요.');
+    const info = await q('INSERT INTO images (user_id, mime, data, created_at) VALUES (?, ?, ?, ?)').run(me.id, mime, buf, now());
+    const id = Number(info.lastInsertRowid);
+    return { status: 201, data: { id, url: `/img/${id}` } };
+  },
+  { limit: 2.4 * 1024 * 1024 }
+);
+
+async function serveImage(req, res, id) {
+  const row = await q('SELECT mime, data FROM images WHERE id = ?').get(id);
+  if (!row) throw new HttpError(404, '사진을 찾을 수 없어요.');
+  const buf = Buffer.from(row.data);
+  res.writeHead(200, {
+    'Content-Type': row.mime,
+    'Content-Length': buf.length,
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Content-Security-Policy': "default-src 'none'",
+  });
+  res.end(req.method === 'HEAD' ? undefined : buf);
+}
 
 /* ───────────── 정적 파일 ───────────── */
 const MIME = {
@@ -675,6 +893,8 @@ const server = http.createServer(async (req, res) => {
 
     if (!pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '허용되지 않는 요청이에요.');
+      const img = /^\/img\/(\d+)$/.exec(pathname);
+      if (img) return await serveImage(req, res, Number(img[1]));
       return serveStatic(req, res, pathname);
     }
 
@@ -711,7 +931,7 @@ const server = http.createServer(async (req, res) => {
       params: matched.params,
       query: url.searchParams,
       user: await currentUser(req),
-      body: mutating ? await readJson(req) : {},
+      body: mutating ? await readJson(req, matched.r.limit) : {},
     };
     const out = await matched.r.handler(ctx);
     if (out && out.data !== undefined) sendJson(res, out.status || 200, out.data, out.headers || {});

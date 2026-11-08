@@ -55,13 +55,14 @@ p { margin: 0 0 .8em; }
 /* 헤더 */
 #top { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); padding: 0 16px; }
 .bar { max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: 10px; padding: 12px 0 6px; }
-.logo { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-size: 1.5rem; color: var(--ink); }
+.logo { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-size: 1.5rem; color: var(--ink); white-space: nowrap; flex: none; }
 .logo:hover { text-decoration: none; }
 .logo b { color: var(--accent); font-weight: 400; }
 .logo svg { width: 30px; height: 20px; flex: none; }
 .logo .ring-a { color: var(--accent); }
 .logo .ring-b { color: var(--ink); }
-.ver-badge { padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); font-size: .7rem; font-weight: 700; line-height: 1.5; white-space: nowrap; user-select: none; }
+.ver-badge { padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); font-size: .7rem; font-weight: 700; line-height: 1.5; white-space: nowrap; user-select: none; flex: none; }
+.bar .btn { white-space: nowrap; flex: none; }
 .bar .spacer { flex: 1; }
 .tabs { max-width: 860px; margin: 0 auto; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
@@ -219,4 +220,50 @@ a.chip:hover { text-decoration: none; }
   .mobnav a span { font-size: 1.15rem; line-height: 1; }
   .mobnav a.on { color: var(--accent); font-weight: 700; }
   #toast { bottom: 88px; }
+}
+
+/* ───── 사진 · 썸네일 ───── */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.card.has-thumb { display: flex; gap: 12px; align-items: center; }
+.card .card-main { flex: 1; min-width: 0; }
+.card .thumb { flex: none; width: 84px; height: 84px; object-fit: cover; border-radius: 10px; background: var(--panel-2); }
+.cover .cover-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.work-thumb { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 12px; margin-bottom: 12px; background: var(--panel-2); }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 12px 0; }
+.gallery.one { grid-template-columns: 1fr; }
+.gallery a { display: block; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--panel-2); }
+.gallery img { display: block; width: 100%; height: 100%; max-height: 520px; object-fit: cover; }
+.gallery.one img { height: auto; object-fit: contain; }
+
+.img-picker .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.img-picker .tiles:empty { display: none; }
+.tile { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.tile img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; }
+.tile.is-thumb { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.tile.loading { display: grid; place-items: center; aspect-ratio: 1 / 1; color: var(--muted); font-size: .8rem; }
+.tile-btns { display: flex; gap: 4px; padding: 4px; justify-content: space-between; }
+.tile-btns .btn { min-height: 30px; padding: 2px 8px; }
+
+/* ───── 답글 · 비밀댓글 ───── */
+.thread { border-top: 1px solid var(--line); }
+.thread > .comment:first-child { border-top: 0; }
+.comment.reply { margin-left: 18px; padding-left: 12px; border-top: 0; border-left: 3px solid var(--accent-soft); }
+.comment .who { align-items: center; }
+.comment .who .btn { min-height: 26px; padding: 0 8px; font-size: .8rem; }
+.comment .who .chip { font-size: .72rem; }
+.secret-note { font-size: .9rem; }
+.reply-form { margin-top: 8px; }
+.reply-form textarea { min-height: 70px; }
+.stack textarea + .check { margin-top: 6px; }
+
+@media (max-width: 850px) {
+  .mobnav a { padding: 4px 5px; font-size: .64rem; }
+}
+
+@media (max-width: 520px) {
+  .bar { gap: 6px; }
+  .logo { font-size: 1.25rem; gap: 6px; }
+  .logo svg { width: 24px; height: 16px; }
+  .ver-badge { font-size: .62rem; padding: 0 6px; }
+  .bar .btn.sm { padding: 3px 9px; }
 }

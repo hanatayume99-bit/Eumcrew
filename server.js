@@ -109,7 +109,22 @@ async function migrate() {
   await addColumn('comments', 'is_secret', 'INTEGER NOT NULL DEFAULT 0');
   await db.execute('CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)');
 }
-const ready = migrate();
+/* 비밀번호를 잊었을 때: Render 환경변수에 RESET_PASSWORD_USER(닉네임)와 RESET_PASSWORD_NEW(새 비밀번호)를 넣고
+   다시 배포하면, 서버가 켜질 때 그 계정의 비밀번호를 바꿔요. 로그인한 뒤에는 두 환경변수를 꼭 지워야 해요. */
+async function resetPasswordFromEnv() {
+  const name = process.env.RESET_PASSWORD_USER;
+  const next = process.env.RESET_PASSWORD_NEW;
+  if (!name || !next) return;
+  if (next.length < 8 || next.length > 100) return void console.error('[비밀번호 복구] RESET_PASSWORD_NEW 는 8자 이상 100자 이하여야 해요.');
+  const r = await db.execute({ sql: 'SELECT id FROM users WHERE username = ?', args: [name] });
+  if (!r.rows.length) return void console.error(`[비밀번호 복구] '${name}' 닉네임을 찾지 못했어요. 대소문자와 철자를 확인해 주세요.`);
+  const id = r.rows[0].id;
+  const salt = crypto.randomBytes(16).toString('hex');
+  await db.execute({ sql: 'UPDATE users SET pw_salt = ?, pw_hash = ? WHERE id = ?', args: [salt, hashPassword(next, salt), id] });
+  await db.execute({ sql: 'DELETE FROM sessions WHERE user_id = ?', args: [id] }); // 예전에 로그인된 기기는 로그아웃
+  console.log(`[비밀번호 복구] '${name}' 비밀번호를 바꿨어요. 로그인한 뒤 Render 환경변수 RESET_PASSWORD_USER, RESET_PASSWORD_NEW 를 지워 주세요.`);
+}
+const ready = migrate().then(resetPasswordFromEnv);
 const now = () => Date.now();
 
 /* ───────────── 공통 유틸 ───────────── */

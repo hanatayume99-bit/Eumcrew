@@ -1,0 +1,17 @@
+{
+  "name": "이음크루",
+  "short_name": "이음크루",
+  "description": "음악을 만드는 사람들을 잇는 무페이 합작 커뮤니티",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6fb",
+  "theme_color": "#f4f6fb",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

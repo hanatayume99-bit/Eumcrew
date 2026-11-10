@@ -565,12 +565,46 @@ route('GET', '/api/home', async (ctx) => {
     const where = t === 'job' ? `${typeWhere(t)} AND p.closed = 0` : typeWhere(t);
     out[t] = (await q(`${POST_SELECT} WHERE ${where} ORDER BY p.created_at DESC LIMIT 5`).all(uid)).map(postView);
   }
+  const DAY = 24 * 60 * 60 * 1000;
+  // 지금 이야기 중: 최근 2주 안에 댓글이 달린 글, 가장 최근 댓글 순
+  const active = await q(
+    `SELECT post_id, MAX(created_at) AS last_at FROM comments WHERE created_at > ? GROUP BY post_id ORDER BY last_at DESC LIMIT 4`
+  ).all(now() - 14 * DAY);
+  out.talk = [];
+  for (const a of active) {
+    const row = await q(`${POST_SELECT} WHERE p.id = ?`).get(uid, a.post_id);
+    if (row) out.talk.push({ ...postView(row), last_comment_at: a.last_at });
+  }
+  // 인기 / 최신 / 답변 필요 (모든 게시판 섞어서)
+  out.popular = (
+    await q(`${POST_SELECT} WHERE p.created_at > ? ORDER BY like_count DESC, p.views DESC, p.created_at DESC LIMIT 6`).all(uid, now() - 30 * DAY)
+  ).map(postView);
+  out.latest = (await q(`${POST_SELECT} WHERE NOT (p.type = 'job' AND p.closed = 1) ORDER BY p.created_at DESC LIMIT 6`).all(uid)).map(postView);
+  out.needs = (
+    await q(`${POST_SELECT} WHERE ${typeWhere('qna')} AND p.closed = 0 ORDER BY comment_count ASC, p.created_at DESC LIMIT 6`).all(uid)
+  ).map(postView);
+  const count = async (where) => (await q(`SELECT COUNT(*) AS n FROM posts p WHERE ${where}`).get()).n;
   out.stats = {
     members: (await q('SELECT COUNT(*) AS n FROM users').get()).n,
-    songs: (await q(`SELECT COUNT(*) AS n FROM posts WHERE type = 'song'`).get()).n,
-    open_jobs: (await q(`SELECT COUNT(*) AS n FROM posts WHERE type = 'job' AND closed = 0`).get()).n,
+    songs: await count(typeWhere('song')),
+    infos: await count(typeWhere('info')),
+    qnas: await count(typeWhere('qna')),
+    open_jobs: await count(`${typeWhere('job')} AND p.closed = 0`),
   };
   return out;
+});
+
+/* 🎲 랜덤 추천: 아무 글이나 하나 (마감된 구인글은 빼요) */
+route('GET', '/api/random', async (ctx) => {
+  const type = ctx.query.get('type');
+  const where = [`NOT (p.type = 'job' AND p.closed = 1)`];
+  if (type) {
+    if (!POST_TYPES.includes(type)) throw bad('type이 올바르지 않아요.');
+    where.push(typeWhere(type));
+  }
+  const row = await q(`SELECT p.id FROM posts p WHERE ${where.join(' AND ')} ORDER BY RANDOM() LIMIT 1`).get();
+  if (!row) throw new HttpError(404, '아직 추천할 글이 없어요.');
+  return { id: Number(row.id) };
 });
 
 route('GET', '/api/posts', async (ctx) => {
@@ -848,6 +882,7 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 function serveStatic(req, res, pathname) {

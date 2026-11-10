@@ -254,7 +254,7 @@ async function t(name, fn) {
     assert.match(home.text, /이음크루/);
     assert.equal((await anon('GET', '/app.js')).status, 200);
     assert.equal((await anon('GET', '/style.css')).status, 200);
-    assert.match((await anon('GET', '/post/1')).text, /<main id="app">/);
+    assert.match((await anon('GET', '/post/1')).text, /<main id="app"/);
   });
   await t('경로 탐색(../)은 막힘', async () => {
     for (const p of ['/../server.js', '/..%2fserver.js', '/%2e%2e/package.json']) {
@@ -437,6 +437,52 @@ async function t(name, fn) {
     assert.equal((await anon('GET', '/api/posts?q=' + encodeURIComponent('우타우'))).json.counts.qna, 1);
     const prof = await anon('GET', '/api/users/stranger');
     assert.equal(prof.json.posts[0].type, 'qna');
+  });
+
+  console.log('홈 구성·랜덤 추천·웹앱');
+  await t('홈: 현황 숫자와 인기/최신/답변 필요/지금 이야기 중 묶음', async () => {
+    const h = (await anon('GET', '/api/home')).json;
+    assert.deepEqual(Object.keys(h.stats).sort(), ['infos', 'members', 'open_jobs', 'qnas', 'songs']);
+    assert.equal(h.stats.qnas, 1);
+    assert.ok(h.stats.songs >= 1 && h.stats.members >= 4);
+    for (const k of ['talk', 'popular', 'latest', 'needs']) assert.ok(Array.isArray(h[k]), k);
+    assert.ok(h.latest.length > 0 && h.latest.length <= 6);
+    // 지금 이야기 중: 방금 댓글이 달린 질문이 들어 있고, 최근 댓글 순
+    assert.ok(h.talk.some((p) => p.id === qnaId));
+    assert.ok(h.talk.length <= 4);
+    // 마감된 구인글은 최신에서 빠짐
+    assert.ok(!h.latest.some((p) => p.type === 'job' && p.closed));
+  });
+  await t('답변 필요: 해결 안 된 질문만, 댓글 적은 순', async () => {
+    assert.equal((await anon('GET', '/api/home')).json.needs.length, 0); // 위에서 해결됨 처리했으니 0
+    const open1 = (await C('POST', '/api/posts', { type: 'qna', title: '아직 해결 전', body: '도와 주세요', extra: { category: '믹싱/마스터링' } })).json.id;
+    const open2 = (await C('POST', '/api/posts', { type: 'qna', title: '댓글 있는 질문', body: '도와 주세요', extra: { category: '기타' } })).json.id;
+    await B('POST', `/api/posts/${open2}/comments`, { body: '답변' });
+    const needs = (await anon('GET', '/api/home')).json.needs.map((p) => p.id);
+    assert.deepEqual(needs, [open1, open2]); // 댓글 0개인 질문이 먼저
+  });
+  await t('인기: 좋아요 많은 글이 앞', async () => {
+    const pop = (await anon('GET', '/api/home')).json.popular;
+    assert.ok(pop.length > 0);
+    for (let i = 1; i < pop.length; i++) assert.ok(pop[i - 1].like_count >= pop[i].like_count);
+  });
+  await t('랜덤 추천: 글 하나를 돌려주고, 종류 지정 가능', async () => {
+    const r = await anon('GET', '/api/random');
+    assert.equal(r.status, 200);
+    assert.ok((await anon('GET', `/api/posts/${r.json.id}`)).json.post);
+    const q2 = await anon('GET', '/api/random?type=qna');
+    assert.equal((await anon('GET', `/api/posts/${q2.json.id}`)).json.post.type, 'qna');
+    assert.equal((await anon('GET', '/api/random?type=hack')).status, 400);
+  });
+  await t('웹앱 설치 파일: manifest·아이콘·테마 스크립트가 올바른 형식으로 제공됨', async () => {
+    const m = await anon('GET', '/manifest.webmanifest');
+    assert.equal(m.status, 200);
+    assert.match(m.headers.get('content-type'), /application\/manifest\+json/);
+    const man = JSON.parse(m.text);
+    assert.equal(man.display, 'standalone');
+    for (const icon of man.icons) assert.equal((await anon('GET', icon.src)).status, 200, icon.src);
+    assert.equal((await anon('GET', '/theme.js')).status, 200);
+    assert.match((await anon('GET', '/')).text, /rel="manifest"/);
   });
 
   console.log('삭제·로그아웃');

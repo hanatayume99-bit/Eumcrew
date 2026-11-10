@@ -116,6 +116,169 @@ function logoSvg() {
   return svg;
 }
 
+/* ───────── 사이드 메뉴 ───────── */
+let menuEl = null;
+let installEvent = null; // 안드로이드 크롬이 "설치 가능"이라고 알려 주면 여기에 담아 둬요
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installEvent = e;
+});
+
+function onMenuKey(e) {
+  if (!menuEl) return;
+  if (e.key === 'Escape') return closeMenu();
+  if (e.key !== 'Tab') return;
+  // 메뉴 안에서만 Tab이 돌게 (키보드 사용자용)
+  const items = [...menuEl.querySelectorAll('a[href], button:not([disabled]), summary')];
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) (e.preventDefault(), last.focus());
+  else if (!e.shiftKey && document.activeElement === last) (e.preventDefault(), first.focus());
+}
+
+function closeMenu(restoreFocus = true) {
+  if (!menuEl) return;
+  menuEl.remove();
+  menuEl = null;
+  document.body.classList.remove('menu-open');
+  document.removeEventListener('keydown', onMenuKey);
+  if (restoreFocus) {
+    const btn = document.querySelector('.menu-btn');
+    if (btn) btn.focus();
+  }
+}
+
+/* 🎲 랜덤 추천: 아무 글이나 하나 열어 줘요 */
+async function randomPick() {
+  closeMenu(false);
+  try {
+    const r = await api('GET', '/api/random');
+    go(`#/post/${r.id}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function openMenu() {
+  if (menuEl) return closeMenu();
+  const link = (href, ic, label) => h('a', { class: 'mlink', href, onclick: () => closeMenu(false) }, h('span', { class: 'mic', 'aria-hidden': 'true' }, ic), label);
+  const action = (ic, label, fn) => h('button', { class: 'mlink', type: 'button', onclick: fn }, h('span', { class: 'mic', 'aria-hidden': 'true' }, ic), label);
+
+  const THEMES = [['', '기기 설정'], ['light', '라이트'], ['ivory', '아이보리'], ['gray', '그레이'], ['dark', '다크']];
+  const curTheme = window.eumTheme ? window.eumTheme.get() : '';
+  const themeRow = h(
+    'div',
+    { class: 'chips', role: 'radiogroup', 'aria-label': '테마' },
+    THEMES.map(([v, label]) =>
+      h(
+        'button',
+        {
+          class: 'chip btnlike' + (v === curTheme ? ' on' : ''),
+          type: 'button',
+          role: 'radio',
+          'aria-checked': String(v === curTheme),
+          onclick: (e) => {
+            if (window.eumTheme) window.eumTheme.set(v);
+            for (const c of themeRow.children) {
+              const on = c === e.currentTarget;
+              c.classList.toggle('on', on);
+              c.setAttribute('aria-checked', String(on));
+            }
+          },
+        },
+        label
+      )
+    )
+  );
+
+  const install = h(
+    'details',
+    { class: 'minstall' },
+    h('summary', null, '📱 홈 화면에 추가'),
+    h(
+      'div',
+      { class: 'small muted stack' },
+      installEvent
+        ? h(
+            'button',
+            {
+              class: 'btn sm primary',
+              type: 'button',
+              onclick: async () => {
+                const ev = installEvent;
+                installEvent = null;
+                closeMenu(false);
+                try {
+                  await ev.prompt();
+                } catch {}
+              },
+            },
+            '앱처럼 설치하기'
+          )
+        : null,
+      h('p', null, '안드로이드 크롬: 오른쪽 위 ⋮ → “홈 화면에 추가”'),
+      h('p', null, '아이폰 사파리: 아래 공유 버튼 → “홈 화면에 추가”')
+    )
+  );
+
+  const account = me
+    ? h(
+        'div',
+        { class: 'mgroup' },
+        link(`#/u/${encodeURIComponent(me.username)}`, '☻', me.username),
+        action('↩', '로그아웃', async () => {
+          closeMenu(false);
+          try {
+            await api('POST', '/api/logout', {});
+          } catch {}
+          me = null;
+          toast('로그아웃했어요.');
+          go('#/');
+        })
+      )
+    : h('div', { class: 'mgroup' }, link('#/login', '☻', '로그인'), link('#/signup', '✚', '가입하기'));
+
+  const panel = h(
+    'aside',
+    { class: 'menu', role: 'dialog', 'aria-modal': 'true', 'aria-label': '메뉴' },
+    h('div', { class: 'row between' }, h('strong', { class: 'mtitle' }, '메뉴'), h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': '메뉴 닫기', onclick: () => closeMenu() }, '✕')),
+    account,
+    h(
+      'nav',
+      { class: 'mgroup', 'aria-label': '게시판' },
+      link('#/', '⌂', '홈'),
+      link('#/songs', '♫', '노래'),
+      link('#/info', '✦', '정보·팁'),
+      link('#/jobs', '＋', '구인구직'),
+      link('#/qna', '?', '질문답변'),
+      link('#/members', '☻', '멤버'),
+      link('#/search', '⌕', '검색')
+    ),
+    h('div', { class: 'mgroup' }, action('🎲', '랜덤 추천 글 보기', randomPick)),
+    me
+      ? h(
+          'div',
+          { class: 'mgroup' },
+          h('div', { class: 'mlabel' }, '글쓰기'),
+          link('#/write/song', '♫', '노래 올리기'),
+          link('#/write/info', '✦', '정보 글쓰기'),
+          link('#/write/job', '＋', '모집·구직 글쓰기'),
+          link('#/write/qna', '?', '질문하기')
+        )
+      : null,
+    h('div', { class: 'mgroup' }, h('div', { class: 'mlabel' }, '테마'), themeRow),
+    install,
+    h('div', { class: 'mfoot muted small' }, `이음크루 ${APP_VERSION}`)
+  );
+  menuEl = h('div', { class: 'menu-root' }, h('div', { class: 'menu-backdrop', onclick: () => closeMenu() }), panel);
+  document.body.append(menuEl);
+  document.body.classList.add('menu-open');
+  document.addEventListener('keydown', onMenuKey);
+  const firstLink = panel.querySelector('a.mlink');
+  if (firstLink) firstLink.focus();
+}
+
 function renderHeader(path) {
   const top = document.getElementById('top');
   const cur = path.split('/')[1] || '';
@@ -157,7 +320,8 @@ function renderHeader(path) {
               '로그아웃'
             ),
           ]
-        : [h('a', { class: 'btn sm ghost', href: '#/login' }, '로그인'), h('a', { class: 'btn sm primary', href: '#/signup' }, '가입')]
+        : [h('a', { class: 'btn sm ghost', href: '#/login' }, '로그인'), h('a', { class: 'btn sm primary', href: '#/signup' }, '가입')],
+      h('button', { class: 'btn sm ghost menu-btn', type: 'button', 'aria-label': '메뉴 열기', 'aria-haspopup': 'dialog', onclick: openMenu }, '☰')
     ),
     h(
       'nav',
@@ -261,7 +425,34 @@ const FEATURES = [
 async function pageHome() {
   const d = await api('GET', '/api/home');
   const head = (title, desc, href, more) =>
-    h('div', { class: 'section-head' }, h('div', null, h('h2', null, title), desc ? h('div', { class: 'muted small' }, desc) : null), h('a', { class: 'more', href }, more));
+    h('div', { class: 'section-head' }, h('div', null, h('h2', null, title), desc ? h('div', { class: 'muted small' }, desc) : null), href ? h('a', { class: 'more', href }, more) : null);
+  const stat = (n, label, href) => h('a', { class: 'stat', href }, h('b', null, String(n)), h('span', null, label));
+
+  // 인기 / 최신 / 답변 필요 탭 (서버에서 한 번에 받아 와서 화면에서만 바꿔요)
+  const feeds = [
+    ['popular', '🔥 인기', d.popular, '아직 인기 글이 없어요.'],
+    ['latest', '🆕 최신', d.latest, '아직 글이 없어요.'],
+    ['needs', '🙋 답변 필요', d.needs, '답변을 기다리는 질문이 없어요. 👏'],
+  ];
+  let curFeed = d.popular.length ? 'popular' : 'latest';
+  const panel = h('div', { role: 'tabpanel' });
+  const tabRow = h('div', { class: 'chips', role: 'tablist', 'aria-label': '둘러보기' });
+  const showFeed = (key) => {
+    curFeed = key;
+    for (const b of tabRow.children) {
+      const on = b.dataset.key === key;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', String(on));
+    }
+    const [, , items, empty] = feeds.find((f) => f[0] === key);
+    panel.replaceChildren(
+      cards(items, empty, { showType: true }),
+      ...(key === 'needs' ? [h('p', { class: 'small' }, h('a', { href: typeLink('qna', '?open=1') }, '해결 안 된 질문 모두 보기 →'))] : [])
+    );
+  };
+  for (const [key, label] of feeds) tabRow.append(h('button', { class: 'chip btnlike', type: 'button', role: 'tab', 'data-key': key, onclick: () => showFeed(key) }, label));
+  showFeed(curFeed);
+
   return h(
     'div',
     null,
@@ -271,14 +462,27 @@ async function pageHome() {
       h('div', { class: 'hero-label' }, '✦ MUSIC CREATOR COMMUNITY'),
       h('h1', null, '음악을 만드는 사람들을 ', h('span', null, '잇다.')),
       h('p', { class: 'muted' }, '작곡가부터 보컬, 일러스트레이터, 영상 제작자까지. 함께 음악을 만들고 새로운 프로젝트를 시작해 보세요.'),
-      h('p', { class: 'muted small' }, `멤버 ${d.stats.members} · 노래 ${d.stats.songs} · 모집 중 ${d.stats.open_jobs}`),
       h(
         'div',
         { class: 'row' },
         h('a', { class: 'btn primary', href: me ? '#/write/song' : '#/signup' }, me ? '노래 올리기' : '가입하고 시작하기'),
-        h('a', { class: 'btn', href: me ? '#/write/job' : '#/jobs' }, me ? '프로젝트 모집하기' : '합작 찾아보기 →')
+        h('a', { class: 'btn', href: me ? '#/write/job' : '#/jobs' }, me ? '프로젝트 모집하기' : '합작 찾아보기 →'),
+        h('button', { class: 'btn ghost', type: 'button', onclick: randomPick, title: '아무 글이나 하나 열어 줘요' }, '🎲 랜덤 추천')
       )
     ),
+    h(
+      'div',
+      { class: 'statbar', role: 'group', 'aria-label': '이음크루 현황' },
+      stat(d.stats.members, '멤버', '#/members'),
+      stat(d.stats.songs, '노래', typeLink('song')),
+      stat(d.stats.infos, '정보·팁', typeLink('info')),
+      stat(d.stats.qnas, '질문', typeLink('qna')),
+      stat(d.stats.open_jobs, '모집 중', typeLink('job'))
+    ),
+    d.talk.length
+      ? h('section', { class: 'section' }, head('💬 지금 이야기 중', '요즘 댓글이 오가는 글', null), cards(d.talk, '', { showType: true }))
+      : null,
+    h('section', { class: 'section' }, head('둘러보기', '', null), tabRow, panel),
     h(
       'section',
       { class: 'section' },
@@ -296,12 +500,6 @@ async function pageHome() {
       { class: 'section' },
       head('정보·팁', '', typeLink('info'), '더 보기 →'),
       cards(d.info.slice(0, 4), '첫 글을 기다리고 있어요!')
-    ),
-    h(
-      'section',
-      { class: 'section' },
-      head('💬 질문답변', '막히는 게 있으면 물어보고, 아는 건 같이 답해 줘요.', typeLink('qna'), '더 보기 →'),
-      cards(d.qna.slice(0, 4), '첫 질문을 기다리고 있어요!')
     ),
     h(
       'section',
@@ -1143,6 +1341,7 @@ let renderSeq = 0;
 async function render() {
   const seq = ++renderSeq;
   const { path, query } = parseHash();
+  closeMenu(false);
   renderHeader(path);
   const app = document.getElementById('app');
   let m;
@@ -1172,6 +1371,11 @@ async function render() {
 }
 
 window.addEventListener('hashchange', render);
+document.getElementById('skip').addEventListener('click', (e) => {
+  e.preventDefault(); // 주소의 #app 이 화면 이동으로 오해되지 않게 직접 포커스만 옮겨요
+  document.getElementById('app').focus();
+});
+if (window.eumTheme) window.eumTheme.apply(window.eumTheme.get()); // 글꼴·CSS가 로드된 뒤 주소창 색 맞추기
 (async () => {
   try {
     me = (await api('GET', '/api/me')).user;

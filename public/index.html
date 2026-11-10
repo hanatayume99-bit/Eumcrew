@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f4f6fb">
   <title>이음크루 · 음악 합작 커뮤니티</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -17,9 +17,22 @@
   <script src="/theme.js"></script>
 </head>
 <body>
+  <div id="loadbar" class="loadbar" aria-hidden="true"><i></i></div>
   <a class="skip" id="skip" href="#app">본문으로 바로가기</a>
   <header id="top"></header>
-  <main id="app" tabindex="-1"><p class="muted center pad">불러오는 중…</p></main>
+  <main id="app" tabindex="-1" aria-busy="true">
+    <!-- 자바스크립트가 켜지기 전에 잠깐 보이는 뼈대 화면 -->
+    <div class="skel-wrap" aria-hidden="true">
+      <div class="skel line xl w30"></div>
+      <div class="cards">
+        <div class="skel-card"><div class="skel-lines"><div class="skel line lg w70"></div><div class="skel line w40"></div></div><div class="skel thumb"></div></div>
+        <div class="skel-card"><div class="skel-lines"><div class="skel line lg w60"></div><div class="skel line w50"></div></div><div class="skel thumb"></div></div>
+        <div class="skel-card"><div class="skel-lines"><div class="skel line lg w80"></div><div class="skel line w30"></div></div><div class="skel thumb"></div></div>
+      </div>
+    </div>
+    <p class="sr-only" role="status">불러오는 중…</p>
+    <noscript><p class="center pad">이음크루를 보려면 브라우저에서 자바스크립트를 켜 주세요.</p></noscript>
+  </main>
   <footer id="foot">
     <p>이음크루는 무페이 합작과 정보 공유를 위한 커뮤니티예요. 작업물의 저작권은 올린 사람에게 있어요.</p>
   </footer>

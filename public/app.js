@@ -16,6 +16,7 @@ const ROLES = ['작곡', '작사', '편곡', '조교', '믹싱', '마스터링',
 const MAX_IMAGES = 6;
 
 let me = null;
+let authReady = false; // /api/me 응답을 받은 뒤에 true
 const imgUrl = (id) => `/img/${id}`;
 
 /* ───────── 유틸 ───────── */
@@ -38,31 +39,104 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
-async function api(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  let data = {};
-  try {
-    data = await res.json();
-  } catch {}
-  if (!res.ok) {
-    const e = new Error(data.error || '요청에 실패했어요.');
-    e.status = res.status;
-    throw e;
-  }
-  return data;
+/* Render 무료 서버는 한동안 안 쓰면 잠들어서 첫 요청이 30초~1분 걸릴 수 있어요.
+   그래서 기다리는 시간을 넉넉히 두고, 읽기 요청(GET)은 서버가 깨어나는 동안 몇 번 더 시도해요. */
+const GET_TIMEOUT = 45000;
+const SEND_TIMEOUT = 30000;
+const RETRY_WAIT = [1500, 4000];
+let inflight = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function setBusy(delta) {
+  inflight = Math.max(0, inflight + delta);
+  document.body.classList.toggle('busy', inflight > 0); // 화면 맨 위 진행 막대
 }
 
+async function request(method, url, body) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), method === 'GET' ? GET_TIMEOUT : SEND_TIMEOUT);
+  try {
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      const timeout = !!err && err.name === 'AbortError';
+      const e = new Error(timeout ? '서버 응답이 늦어지고 있어요. 잠시 뒤에 다시 시도해 주세요.' : '인터넷 연결을 확인해 주세요.');
+      e.status = 0;
+      e.timeout = timeout;
+      e.network = !timeout;
+      throw e;
+    }
+    // 서버가 깨어나는 중이면 JSON 대신 안내용 HTML 페이지가 올 수 있어요
+    const isHtml = /text\/html/.test(res.headers.get('content-type') || '');
+    let data = {};
+    if (!isHtml) {
+      try {
+        data = await res.json();
+      } catch {}
+    }
+    if (isHtml || !res.ok) {
+      const e = new Error(isHtml ? '서버가 아직 준비 중이에요. 잠시 뒤에 다시 시도해 주세요.' : data.error || '요청에 실패했어요.');
+      e.status = isHtml && res.ok ? 503 : res.status;
+      throw e;
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function api(method, url, body) {
+  setBusy(1);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request(method, url, body);
+      } catch (e) {
+        const retryable = method === 'GET' && (e.network || [502, 503, 504].includes(e.status));
+        if (!retryable || attempt >= RETRY_WAIT.length) throw e;
+        await sleep(RETRY_WAIT[attempt]);
+      }
+    }
+  } finally {
+    setBusy(-1);
+  }
+}
+
+/* 토스트: toast('메시지') = 성공, toast('메시지', true) = 오류, toast('메시지', 'info') = 안내 */
 let toastTimer;
-function toast(msg, isBad) {
+const hideToast = () => {
+  document.getElementById('toast').className = '';
+};
+function toast(msg, kind) {
+  const k = kind === true ? 'bad' : kind || 'ok';
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'show' + (isBad ? ' bad' : '');
+  t.replaceChildren(h('span', { class: 'ti', 'aria-hidden': 'true' }, { ok: '✓', bad: '!', info: 'i' }[k] || '✓'), h('span', null, msg));
+  t.setAttribute('role', k === 'bad' ? 'alert' : 'status');
+  t.className = 'show ' + k;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.className = ''), 2400);
+  toastTimer = setTimeout(hideToast, k === 'bad' ? 4500 : 2600);
+}
+document.getElementById('toast').addEventListener('click', hideToast);
+
+/* 버튼을 누르면 글자를 바꾸고 돌아가는 표시를 보여 주면서 끝날 때까지 잠가요 (중복 클릭 방지) */
+async function withBusy(btn, label, fn) {
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.textContent = label;
+  try {
+    return await fn();
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('is-busy');
+    btn.textContent = old;
+  }
 }
 
 function ago(ms) {
@@ -97,6 +171,131 @@ const go = (hash) => {
   else location.hash = hash;
 };
 const typeLink = (t, query = '') => `#/${TYPES[t].path}${query}`;
+
+/* ───────── 빈 화면 · 오류 화면 · 로딩(스켈레톤) ───────── */
+function emptyState({ icon = '📭', title, desc, actions = [], compact = false }) {
+  return h(
+    'div',
+    { class: 'empty' + (compact ? ' compact' : '') },
+    h('div', { class: 'empty-ic', 'aria-hidden': 'true' }, icon),
+    h('div', { class: 'empty-title' }, title),
+    desc ? h('p', { class: 'empty-desc' }, desc) : null,
+    actions.length ? h('div', { class: 'row' }, actions) : null
+  );
+}
+
+/* 오류가 나도 막다른 길이 되지 않게: 다시 시도 / 이전 화면 / 홈으로 버튼을 항상 줘요 */
+function errorView(e) {
+  let icon = '⚠️';
+  let title = '문제가 생겼어요';
+  let desc = e.message || '잠시 뒤에 다시 시도해 주세요.';
+  if (e.network) [icon, title, desc] = ['📡', '인터넷 연결이 불안정해요', '연결을 확인한 뒤 다시 시도해 주세요.'];
+  else if (e.timeout) [icon, title, desc] = ['⏳', '서버가 아직 깨어나는 중이에요', '무료 서버라 오랜만에 접속하면 첫 로딩이 느려요. 잠시 뒤에 다시 시도해 주세요.'];
+  else if (e.status === 404) [icon, title] = ['🔍', '찾을 수 없어요'];
+  else if (e.status === 401) [icon, title, desc] = ['🔒', '로그인이 필요해요', '로그인한 뒤에 이용할 수 있어요.'];
+  else if (e.status === 403) [icon, title] = ['🚫', '권한이 없어요'];
+  else if (e.status >= 500) [icon, title, desc] = ['🛠️', '서버가 잠시 불안정해요', '잠깐 뒤에 다시 시도해 주세요. 계속되면 운영진에게 알려 주세요.'];
+  const retryable = e.network || e.timeout || e.status >= 500 || e.status === 0;
+  return h(
+    'div',
+    { class: 'errbox', role: 'alert' },
+    h('div', { class: 'empty-ic', 'aria-hidden': 'true' }, icon),
+    h('h1', null, title),
+    h('p', { class: 'muted' }, desc),
+    h(
+      'div',
+      { class: 'row' },
+      retryable ? h('button', { class: 'btn primary', type: 'button', onclick: () => render() }, '다시 시도') : null,
+      e.status === 401 ? h('a', { class: 'btn primary', href: '#/login?next=' + encodeURIComponent(location.hash || '#/') }, '로그인') : null,
+      history.length > 1 ? h('button', { class: 'btn', type: 'button', onclick: () => history.back() }, '← 이전 화면') : null,
+      h('a', { class: 'btn', href: '#/' }, '홈으로')
+    )
+  );
+}
+
+const sk = (cls) => h('div', { class: 'skel ' + cls });
+const skelCards = (n = 4, thumb = true) =>
+  h('div', { class: 'cards' }, Array.from({ length: n }, () => h('div', { class: 'skel-card' }, h('div', { class: 'skel-lines' }, sk('line lg w70'), sk('line w40'), sk('line sm w50')), thumb ? sk('thumb') : null)));
+const skelComments = () =>
+  h('div', { class: 'skel-wrap' }, Array.from({ length: 2 }, () => h('div', { class: 'skel-comment' }, sk('line sm w30'), sk('line w80'))));
+
+function skeletonKind(path) {
+  if (path === '/') return 'home';
+  if (/^\/post\//.test(path)) return 'post';
+  if (/^\/u\//.test(path)) return 'profile';
+  return 'list';
+}
+function skeletonFor(kind) {
+  const wrap = (...kids) => h('div', { class: 'skel-wrap', 'aria-hidden': 'true' }, kids);
+  if (kind === 'home') {
+    return wrap(sk('hero-blk'), h('div', { class: 'statbar' }, Array.from({ length: 5 }, () => sk('stat-blk'))), sk('line lg w30'), skelCards(3));
+  }
+  if (kind === 'post') {
+    return wrap(
+      sk('line sm w20'),
+      sk('line xl w80'),
+      h('div', { class: 'skel-row' }, sk('circle'), h('div', { class: 'skel-lines' }, sk('line w30'), sk('line sm w40'))),
+      sk('block'),
+      sk('line lg w30'),
+      skelComments()
+    );
+  }
+  if (kind === 'profile') {
+    return wrap(h('div', { class: 'skel-row' }, sk('circle lg'), h('div', { class: 'skel-lines' }, sk('line xl w40'), sk('line w60'))), sk('block'), sk('line lg w40'), skelCards(3));
+  }
+  return wrap(h('div', { class: 'skel-row between' }, sk('line xl w30'), sk('btn-blk')), sk('input-blk'), skelCards(5));
+}
+
+/* 로딩 표시: 0.2초 안에 끝나면 아무것도 안 보이고(깜빡임 방지), 더 걸리면 뼈대 화면,
+   3.5초가 넘으면 "서버를 깨우는 중" 안내를 보여 줘요 */
+let loadingTimers = [];
+function showSkeleton(app, kind) {
+  const old = app.querySelector(':scope > .wake');
+  if (old && app.dataset.skel === kind) return old;
+  const wake = h(
+    'div',
+    { class: 'wake', role: 'status', hidden: true },
+    h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+    h('div', null, h('b', null, '서버를 깨우는 중이에요'), h('span', { class: 'small' }, '무료 서버라 오랜만에 접속하면 첫 로딩이 최대 1분쯤 걸려요. 조금만 기다려 주세요!'))
+  );
+  app.replaceChildren(wake, skeletonFor(kind));
+  app.dataset.skel = kind;
+  app.setAttribute('aria-busy', 'true');
+  return wake;
+}
+function beginLoading(path, immediate = false) {
+  endLoading();
+  const app = document.getElementById('app');
+  const kind = skeletonKind(path);
+  let wake = null;
+  const show = () => (wake = showSkeleton(app, kind));
+  if (immediate) show();
+  else loadingTimers.push(setTimeout(show, 200));
+  loadingTimers.push(
+    setTimeout(() => {
+      if (!wake) show();
+      wake.hidden = false;
+    }, 3500)
+  );
+}
+function endLoading() {
+  loadingTimers.forEach(clearTimeout);
+  loadingTimers = [];
+  const app = document.getElementById('app');
+  app.removeAttribute('aria-busy');
+}
+
+/* 로그아웃 (헤더·메뉴 공용) */
+async function logout() {
+  try {
+    await api('POST', '/api/logout', {});
+  } catch (e) {
+    return toast('로그아웃하지 못했어요. 잠시 뒤에 다시 시도해 주세요.', true);
+  }
+  me = null;
+  toast('로그아웃했어요.');
+  go('#/');
+}
 
 /* ───────── 헤더 ───────── */
 const APP_VERSION = 'v1.1.0-beta1';
@@ -227,14 +426,9 @@ function openMenu() {
         'div',
         { class: 'mgroup' },
         link(`#/u/${encodeURIComponent(me.username)}`, '☻', me.username),
-        action('↩', '로그아웃', async () => {
+        action('↩', '로그아웃', () => {
           closeMenu(false);
-          try {
-            await api('POST', '/api/logout', {});
-          } catch {}
-          me = null;
-          toast('로그아웃했어요.');
-          go('#/');
+          return logout();
         })
       )
     : h('div', { class: 'mgroup' }, link('#/login', '☻', '로그인'), link('#/signup', '✚', '가입하기'));
@@ -292,7 +486,7 @@ function renderHeader(path) {
       item('#/jobs', '＋', '모집', cur === 'jobs'),
       item('#/qna', '?', '질문', cur === 'qna'),
       item('#/search', '⌕', '검색', cur === 'search'),
-      item(me ? `#/u/${encodeURIComponent(me.username)}` : '#/login', '☻', me ? '마이' : '로그인', cur === 'u' || cur === 'members' || cur === 'me' || cur === 'login' || cur === 'signup')
+      item(me ? `#/u/${encodeURIComponent(me.username)}` : authReady ? '#/login' : '#/me', '☻', me || !authReady ? '마이' : '로그인', cur === 'u' || cur === 'members' || cur === 'me' || cur === 'login' || cur === 'signup')
     );
   }
   const tab = (href, label, on) => h('a', { class: 'tab', href, 'aria-selected': on ? 'true' : 'false' }, label);
@@ -303,22 +497,12 @@ function renderHeader(path) {
       h('a', { class: 'logo', href: '#/', 'aria-label': '이음크루 홈' }, logoSvg(), h('span', null, '이음', h('b', null, '크루'))),
       h('span', { class: 'ver-badge', title: `이음크루 ${APP_VERSION}` }, APP_VERSION),
       h('span', { class: 'spacer' }),
-      me
+      !authReady
+        ? null // 로그인 여부를 아직 모르면 버튼을 비워 둬요 (로그인 버튼이 잠깐 보였다 사라지는 깜빡임 방지)
+        : me
         ? [
             h('a', { class: 'btn sm ghost', href: `#/u/${encodeURIComponent(me.username)}` }, me.username),
-            h(
-              'button',
-              {
-                class: 'btn sm ghost',
-                onclick: async () => {
-                  await api('POST', '/api/logout', {});
-                  me = null;
-                  toast('로그아웃했어요.');
-                  go('#/');
-                },
-              },
-              '로그아웃'
-            ),
+            h('button', { class: 'btn sm ghost', type: 'button', onclick: logout }, '로그아웃'),
           ]
         : [h('a', { class: 'btn sm ghost', href: '#/login' }, '로그인'), h('a', { class: 'btn sm primary', href: '#/signup' }, '가입')],
       h('button', { class: 'btn sm ghost menu-btn', type: 'button', 'aria-label': '메뉴 열기', 'aria-haspopup': 'dialog', onclick: openMenu }, '☰')
@@ -339,7 +523,7 @@ function renderHeader(path) {
 
 /* ───────── 카드 ───────── */
 function postCard(p, { showType = false } = {}) {
-  const meta = [h('span', null, p.author.username), h('span', null, ago(p.created_at))];
+  const meta = [h('span', { class: 'author' }, p.author.username), h('span', null, ago(p.created_at))];
   if (p.like_count) meta.push(h('span', null, `♥ ${p.like_count}`));
   if (p.comment_count) meta.push(h('span', null, `💬 ${p.comment_count}`));
   const chips = [];
@@ -369,8 +553,9 @@ function postCard(p, { showType = false } = {}) {
   );
 }
 
+/* empty: 문장(string)이나 emptyState(...)로 만든 화면 */
 const cards = (items, empty = '아직 글이 없어요.', opts) =>
-  items.length ? h('div', { class: 'cards' }, items.map((p) => postCard(p, opts))) : h('div', { class: 'empty' }, empty);
+  items.length ? h('div', { class: 'cards' }, items.map((p) => postCard(p, opts))) : empty && empty.nodeType ? empty : emptyState({ title: empty, compact: true });
 
 /* ───────── 홈 ───────── */
 function dday(deadline) {
@@ -487,13 +672,17 @@ async function pageHome() {
       'section',
       { class: 'section' },
       head('🔥 지금 모집 중인 합작', '새로운 프로젝트에 참여해 보세요.', typeLink('job'), '전체 보기 →'),
-      d.job.length ? h('div', { class: 'projects' }, d.job.slice(0, 3).map(projectCard)) : h('div', { class: 'empty' }, '모집 중인 글이 아직 없어요.')
+      d.job.length
+        ? h('div', { class: 'projects' }, d.job.slice(0, 3).map(projectCard))
+        : emptyState({ icon: '🤝', title: '모집 중인 글이 아직 없어요', desc: '함께하고 싶은 프로젝트가 있다면 먼저 모집해 보세요.', actions: [h('a', { class: 'btn primary sm', href: me ? '#/write/job' : '#/signup' }, me ? '모집 글 쓰기' : '가입하고 모집하기')] })
     ),
     h(
       'section',
       { class: 'section' },
       head('🎧 최근 작업물', '이음크루에서 올라온 새로운 음악들', typeLink('song'), '더 보기 →'),
-      d.song.length ? h('div', { class: 'works' }, d.song.slice(0, 4).map(workCard)) : h('div', { class: 'empty' }, '첫 곡을 기다리고 있어요!')
+      d.song.length
+        ? h('div', { class: 'works' }, d.song.slice(0, 4).map(workCard))
+        : emptyState({ icon: '🎧', title: '첫 곡을 기다리고 있어요', desc: '만든 노래의 링크를 올려서 이음크루의 첫 작업물이 되어 보세요.', actions: [h('a', { class: 'btn primary sm', href: me ? '#/write/song' : '#/signup' }, me ? '노래 올리기' : '가입하고 올리기')] })
     ),
     h(
       'section',
@@ -538,7 +727,7 @@ async function pageList(type, query) {
   const chipRow = (label, key, options) =>
     h(
       'div',
-      { class: 'chips', role: 'group', 'aria-label': label },
+      { class: 'chips scroll', role: 'group', 'aria-label': label },
       h('button', { class: 'chip btnlike' + (!query.get(key) ? ' on' : ''), onclick: () => nav({ [key]: '' }) }, '전체'),
       options.map(([val, text]) => h('button', { class: 'chip btnlike' + (query.get(key) === val ? ' on' : ''), onclick: () => nav({ [key]: val }) }, text))
     );
@@ -589,20 +778,31 @@ async function pageList(type, query) {
         )
       : null;
 
+  const writeHref = me ? `#/write/${type}` : '#/login?next=' + encodeURIComponent(`#/write/${type}`);
+  const hasFilter = ['q', 'tag', 'kind', 'category', 'role', 'open'].some((k) => query.get(k));
+  const emptyView = query.get('q')
+    ? emptyState({
+        icon: '🔍',
+        title: `“${query.get('q')}”에 맞는 글이 없어요`,
+        desc: '낱말을 줄이거나 다른 말로 찾아 보세요.',
+        actions: [
+          h('button', { class: 'btn sm', type: 'button', onclick: () => nav({ q: '' }) }, '검색어 지우기'),
+          h('a', { class: 'btn sm', href: `#/search?q=${encodeURIComponent(query.get('q'))}` }, '전체에서 찾기'),
+        ],
+      })
+    : hasFilter
+    ? emptyState({ icon: '🗂️', title: '조건에 맞는 글이 없어요', desc: '필터를 바꾸거나 모두 해제해 보세요.', actions: [h('button', { class: 'btn sm', type: 'button', onclick: () => go(typeLink(type)) }, '필터 모두 해제')] })
+    : emptyState({ icon: '✍️', title: `아직 ${T.label} 글이 없어요`, desc: '첫 글의 주인공이 되어 보세요!', actions: [h('a', { class: 'btn primary sm', href: writeHref }, T.write)] });
+
   return h(
     'div',
     null,
-    h(
-      'div',
-      { class: 'row between' },
-      h('h1', null, T.label),
-      h('a', { class: 'btn primary', href: me ? `#/write/${type}` : '#/login?next=' + encodeURIComponent(`#/write/${type}`) }, T.write)
-    ),
+    h('div', { class: 'page-head' }, h('h1', null, T.label), h('a', { class: 'btn primary', href: writeHref }, T.write)),
     type === 'job' ? h('div', { class: 'notice' }, '이 게시판은 무페이 합작 전용이에요. 크레딧 표기나 수익 배분 여부는 글에 꼭 적어 주세요.') : null,
     type === 'qna' ? h('p', { class: 'muted small' }, '작곡·조교·믹싱 등 궁금한 걸 물어보고, 아는 건 댓글로 같이 답해 주세요. 질문자는 해결되면 "해결됨"으로 표시할 수 있어요.') : null,
     h('div', { class: 'filters' }, filters, tagNote, h('div', { class: 'row between' }, h('span', { class: 'muted small' }, `총 ${d.total}개`), sort)),
     query.get('q') ? h('p', { class: 'small' }, h('a', { href: `#/search?q=${encodeURIComponent(query.get('q'))}` }, '다른 게시판·멤버에서도 찾아보기 →')) : null,
-    cards(d.items, query.get('q') ? '검색 결과가 없어요. 낱말을 줄이거나 다른 말로 찾아 보세요.' : '조건에 맞는 글이 없어요.'),
+    cards(d.items, emptyView),
     pager
   );
 }
@@ -616,13 +816,21 @@ async function pagePost(id) {
   const likeBtn = h('button', {
     class: 'btn sm' + (p.liked ? ' on' : ''),
     onclick: async () => {
-      if (!me) return go('#/login?next=' + encodeURIComponent(`#/post/${id}`));
+      if (!me) {
+        toast('로그인하면 좋아요를 누를 수 있어요.', 'info');
+        return go('#/login?next=' + encodeURIComponent(`#/post/${id}`));
+      }
+      if (likeBtn.disabled) return;
+      likeBtn.disabled = true;
       try {
         const r = await api('POST', `/api/posts/${id}/like`, {});
         likeBtn.className = 'btn sm' + (r.liked ? ' on' : '');
         likeBtn.textContent = `♥ ${r.like_count}`;
+        toast(r.liked ? '좋아요를 눌렀어요.' : '좋아요를 취소했어요.');
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        likeBtn.disabled = false;
       }
     },
   }, `♥ ${p.like_count}`);
@@ -671,15 +879,16 @@ async function pagePost(id) {
       actions.push(
         h('button', {
           class: 'btn sm',
-          onclick: async () => {
-            try {
-              await api('PUT', `/api/posts/${id}`, { ...p, closed: !p.closed });
-              toast(isQ ? (p.closed ? '해결 표시를 뺐어요.' : '해결됨으로 표시했어요.') : p.closed ? '다시 모집해요.' : '마감 처리했어요.');
-              render();
-            } catch (e) {
-              toast(e.message, true);
-            }
-          },
+          onclick: (ev) =>
+            withBusy(ev.currentTarget, '처리 중…', async () => {
+              try {
+                await api('PUT', `/api/posts/${id}`, { ...p, closed: !p.closed });
+                toast(isQ ? (p.closed ? '해결 표시를 뺐어요.' : '해결됨으로 표시했어요.') : p.closed ? '다시 모집해요.' : '마감 처리했어요.');
+                render();
+              } catch (e) {
+                toast(e.message, true);
+              }
+            }),
         }, isQ ? (p.closed ? '해결 취소' : '✔ 해결됨으로 표시') : p.closed ? '다시 열기' : '마감하기')
       );
     }
@@ -687,21 +896,23 @@ async function pagePost(id) {
       h('a', { class: 'btn sm', href: `#/edit/${id}` }, '수정'),
       h('button', {
         class: 'btn sm danger',
-        onclick: async () => {
+        onclick: (ev) => {
           if (!confirm('이 글을 삭제할까요? 되돌릴 수 없어요.')) return;
-          try {
-            await api('DELETE', `/api/posts/${id}`);
-            toast('삭제했어요.');
-            go(typeLink(p.type));
-          } catch (e) {
-            toast(e.message, true);
-          }
+          return withBusy(ev.currentTarget, '삭제 중…', async () => {
+            try {
+              await api('DELETE', `/api/posts/${id}`);
+              toast('삭제했어요.');
+              go(typeLink(p.type));
+            } catch (e) {
+              toast(e.message, true);
+            }
+          });
         },
       }, '삭제')
     );
   }
 
-  const commentsBox = h('div', { id: 'comments' });
+  const commentsBox = h('div', { id: 'comments', 'aria-busy': 'true' }, skelComments());
   loadComments(id, commentsBox, p.type === 'qna');
   const gallery = p.images.length
     ? h(
@@ -719,7 +930,12 @@ async function pagePost(id) {
       'div',
       { class: 'post-head' },
       h('h1', null, p.title),
-      h('div', { class: 'row muted small' }, h('a', { href: `#/u/${encodeURIComponent(p.author.username)}` }, p.author.username), h('span', null, ago(p.created_at)), h('span', null, `조회 ${p.views}`))
+      h(
+        'div',
+        { class: 'byline' },
+        avatar(p.author.username, true),
+        h('div', null, h('a', { class: 'name', href: `#/u/${encodeURIComponent(p.author.username)}` }, p.author.username), h('div', { class: 'sub' }, `${ago(p.created_at)} · 조회 ${p.views}`))
+      )
     ),
     media,
     details,
@@ -727,7 +943,7 @@ async function pagePost(id) {
     p.body ? h('div', { class: 'body' }, p.body) : null,
     tags ? h('div', { class: 'stack' }, h('div'), tags) : null,
     h('div', { class: 'row' }, actions),
-    h('h2', { class: 'section-head' }, p.type === 'qna' ? '답변' : '댓글'),
+    h('h2', { class: 'comments-title' }, p.type === 'qna' ? '답변' : '댓글', h('span', { id: 'c-count', class: 'count' })),
     commentsBox
   );
 }
@@ -742,17 +958,18 @@ function commentForm({ postId, parentId = null, placeholder, forceSecret = false
     'form',
     {
       class: 'stack' + (parentId ? ' reply-form' : ''),
-      onsubmit: async (e) => {
+      onsubmit: (e) => {
         e.preventDefault();
         err.textContent = '';
-        btn.disabled = true;
-        try {
-          await api('POST', `/api/posts/${postId}/comments`, { body: ta.value, parent_id: parentId, secret: secret.checked });
-          onDone();
-        } catch (er) {
-          err.textContent = er.message;
-          btn.disabled = false;
-        }
+        return withBusy(btn, '등록 중…', async () => {
+          try {
+            await api('POST', `/api/posts/${postId}/comments`, { body: ta.value, parent_id: parentId, secret: secret.checked });
+            toast(parentId ? '답글을 남겼어요.' : secret.checked ? '비밀 댓글을 남겼어요.' : '댓글을 남겼어요.');
+            onDone();
+          } catch (er) {
+            err.textContent = er.message;
+          }
+        });
       },
     },
     ta,
@@ -802,15 +1019,18 @@ async function loadComments(postId, box, isQna = false) {
         me && !c.hidden && (me.id === c.author.id || me.is_admin)
           ? h('button', {
               class: 'btn sm ghost danger',
-              onclick: async () => {
+              onclick: (ev) => {
                 const hasReplies = !isReply && (replies.get(c.id) || []).length;
                 if (!confirm(hasReplies ? '댓글을 삭제할까요? 달린 답글도 함께 지워져요.' : '삭제할까요?')) return;
-                try {
-                  await api('DELETE', `/api/comments/${c.id}`);
-                  reload();
-                } catch (e) {
-                  toast(e.message, true);
-                }
+                return withBusy(ev.currentTarget, '삭제 중…', async () => {
+                  try {
+                    await api('DELETE', `/api/comments/${c.id}`);
+                    toast('삭제했어요.');
+                    reload();
+                  } catch (e) {
+                    toast(e.message, true);
+                  }
+                });
               },
             }, '삭제')
           : null
@@ -828,9 +1048,22 @@ async function loadComments(postId, box, isQna = false) {
     const form = me
       ? commentForm({ postId, placeholder: isQna ? '답변이나 댓글을 남겨 보세요' : '댓글을 남겨 보세요', onDone: reload })
       : h('p', { class: 'muted' }, h('a', { href: '#/login?next=' + encodeURIComponent(`#/post/${postId}`) }, '로그인'), '하면 댓글을 쓸 수 있어요.');
-    box.replaceChildren(...(list.length ? list : [h('p', { class: 'muted' }, isQna ? '아직 답변이 없어요. 아는 만큼 도와 주세요!' : '첫 댓글을 남겨 보세요.')]), form);
+    const empty = emptyState({ icon: '💬', title: isQna ? '아직 답변이 없어요' : '아직 댓글이 없어요', desc: isQna ? '아는 만큼 도와 주세요!' : '첫 댓글을 남겨 보세요.', compact: true });
+    box.removeAttribute('aria-busy');
+    box.replaceChildren(...(list.length ? list : [empty]), form);
+    const count = document.getElementById('c-count');
+    if (count) count.textContent = comments.length ? String(comments.length) : '';
   } catch (e) {
-    box.replaceChildren(h('p', { class: 'err' }, e.message));
+    box.removeAttribute('aria-busy');
+    box.replaceChildren(
+      emptyState({
+        icon: '📡',
+        title: (isQna ? '답변' : '댓글') + '을 불러오지 못했어요',
+        desc: e.message,
+        compact: true,
+        actions: [h('button', { class: 'btn sm primary', type: 'button', onclick: () => ((box.innerHTML = ''), box.append(skelComments()), loadComments(postId, box, isQna)) }, '다시 불러오기')],
+      })
+    );
   }
 }
 
@@ -888,7 +1121,7 @@ function imagePicker(initialIds = [], initialThumb = null) {
           )
         )
       ),
-      ...(busy ? [h('div', { class: 'tile loading' }, '올리는 중…')] : [])
+      ...(busy ? [h('div', { class: 'tile loading', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), '올리는 중…')] : [])
     );
     addBtn.disabled = ids.length + busy >= MAX_IMAGES;
     msg.textContent = ids.length
@@ -931,9 +1164,9 @@ async function pageWrite(type, editId) {
   if (editId) {
     post = (await api('GET', `/api/posts/${editId}`)).post;
     type = post.type;
-    if (!(me.id === post.author.id || me.is_admin)) throw new Error('수정 권한이 없어요.');
+    if (!(me.id === post.author.id || me.is_admin)) throw Object.assign(new Error('이 글을 수정할 권한이 없어요.'), { status: 403 });
   }
-  if (!TYPES[type]) throw new Error('없는 글 종류예요.');
+  if (!TYPES[type]) throw Object.assign(new Error('없는 글 종류예요.'), { status: 404 });
   const ex = post.extra || {};
 
   const f = {};
@@ -994,14 +1227,13 @@ async function pageWrite(type, editId) {
     'form',
     {
       class: 'form',
-      onsubmit: async (e) => {
+      onsubmit: (e) => {
         e.preventDefault();
         err.textContent = '';
         if (picker.uploading()) {
           err.textContent = '사진을 올리는 중이에요. 잠깐만 기다려 주세요.';
           return;
         }
-        submit.disabled = true;
         const val = (k) => (f[k] ? f[k].value : '');
         const extra =
           type === 'song'
@@ -1021,14 +1253,16 @@ async function pageWrite(type, editId) {
           thumb: pics.thumb,
           closed: f.closed ? f.closed.checked : !!(editId && type === 'qna' && post.closed),
         };
-        try {
-          const r = editId ? await api('PUT', `/api/posts/${editId}`, payload) : await api('POST', '/api/posts', payload);
-          toast(editId ? '저장했어요.' : '올렸어요!');
-          go(`#/post/${editId || r.id}`);
-        } catch (er) {
-          err.textContent = er.message;
-          submit.disabled = false;
-        }
+        return withBusy(submit, editId ? '저장 중…' : '올리는 중…', async () => {
+          try {
+            const r = editId ? await api('PUT', `/api/posts/${editId}`, payload) : await api('POST', '/api/posts', payload);
+            toast(editId ? '저장했어요.' : '올렸어요!');
+            go(`#/post/${editId || r.id}`);
+          } catch (er) {
+            err.textContent = er.message;
+            toast(er.message, true);
+          }
+        });
       },
     },
     fields,
@@ -1054,19 +1288,19 @@ function pageAuth(mode, query) {
       'form',
       {
         class: 'form',
-        onsubmit: async (e) => {
+        onsubmit: (e) => {
           e.preventDefault();
           err.textContent = '';
-          btn.disabled = true;
-          try {
-            const r = await api('POST', isSignup ? '/api/signup' : '/api/login', { username: name.value, password: pw.value });
-            me = r.user;
-            toast(isSignup ? '환영해요!' : '반가워요!');
-            go(next);
-          } catch (er) {
-            err.textContent = er.message;
-            btn.disabled = false;
-          }
+          return withBusy(btn, isSignup ? '가입하는 중…' : '로그인하는 중…', async () => {
+            try {
+              const r = await api('POST', isSignup ? '/api/signup' : '/api/login', { username: name.value, password: pw.value });
+              me = r.user;
+              toast(isSignup ? '환영해요!' : '반가워요!');
+              go(next);
+            } catch (er) {
+              err.textContent = er.message;
+            }
+          });
         },
       },
       h('div', { class: 'field' }, h('label', { for: 'a-name' }, '닉네임'), name, isSignup ? h('div', { class: 'hint' }, '2~20자, 한글·영문·숫자·_ . - 사용 가능') : null),
@@ -1102,12 +1336,17 @@ async function pageProfile(username) {
       ),
       mine ? h('a', { class: 'btn sm', href: '#/me' }, '프로필 수정') : null
     ),
-    u.bio ? h('div', { class: 'body' }, u.bio) : h('p', { class: 'muted' }, '아직 소개가 없어요.'),
+    u.bio ? h('div', { class: 'body' }, u.bio) : h('p', { class: 'muted' }, mine ? '아직 소개가 없어요. 프로필 수정에서 소개를 적어 보세요.' : '아직 소개가 없어요.'),
     u.links.length
       ? h('ul', { class: 'link-list' }, u.links.map((l) => h('li', null, h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, `↗ ${l.label}`))))
       : null,
-    h('section', { class: 'section' }, h('h2', null, `포트폴리오 · 노래 ${songs.length}`), cards(songs, '아직 올린 노래가 없어요.')),
-    h('section', { class: 'section' }, h('h2', null, '쓴 글'), cards(others, '아직 쓴 글이 없어요.'))
+    h(
+      'section',
+      { class: 'section' },
+      h('h2', null, `포트폴리오 · 노래 ${songs.length}`),
+      cards(songs, emptyState({ icon: '🎧', title: '아직 올린 노래가 없어요', desc: mine ? '만든 노래를 올리면 포트폴리오로 모여요.' : '', actions: mine ? [h('a', { class: 'btn primary sm', href: '#/write/song' }, '노래 올리기')] : [], compact: true }))
+    ),
+    h('section', { class: 'section' }, h('h2', null, '쓴 글'), cards(others, emptyState({ icon: '📝', title: '아직 쓴 글이 없어요', compact: true })))
   );
 }
 
@@ -1132,6 +1371,7 @@ async function pageEditProfile() {
   const pwCur = h('input', { type: 'password', id: 'pw-cur', autocomplete: 'current-password', maxlength: 100 });
   const pwNew = h('input', { type: 'password', id: 'pw-new', autocomplete: 'new-password', maxlength: 100 });
   const pwErr = h('div', { class: 'err' });
+  const pwBtn = h('button', { class: 'btn', type: 'submit' }, '변경');
 
   return h(
     'div',
@@ -1141,25 +1381,25 @@ async function pageEditProfile() {
       'form',
       {
         class: 'form',
-        onsubmit: async (e) => {
+        onsubmit: (e) => {
           e.preventDefault();
           err.textContent = '';
-          save.disabled = true;
           const links = [...linkBox.querySelectorAll('.link-row')]
             .map((row) => {
               const [a, b] = row.querySelectorAll('input');
               return { label: a.value, url: b.value };
             })
             .filter((l) => l.label.trim() || l.url.trim());
-          try {
-            const r = await api('PUT', '/api/me', { bio: bio.value, roles: [...roles], links, open_to_work: open.checked });
-            me = r.user;
-            toast('저장했어요.');
-            go(`#/u/${encodeURIComponent(me.username)}`);
-          } catch (er) {
-            err.textContent = er.message;
-            save.disabled = false;
-          }
+          return withBusy(save, '저장 중…', async () => {
+            try {
+              const r = await api('PUT', '/api/me', { bio: bio.value, roles: [...roles], links, open_to_work: open.checked });
+              me = r.user;
+              toast('저장했어요.');
+              go(`#/u/${encodeURIComponent(me.username)}`);
+            } catch (er) {
+              err.textContent = er.message;
+            }
+          });
         },
       },
       h('div', { class: 'field' }, h('label', { for: 'p-bio' }, '소개'), bio),
@@ -1173,23 +1413,25 @@ async function pageEditProfile() {
       'form',
       {
         class: 'form stack',
-        onsubmit: async (e) => {
+        onsubmit: (e) => {
           e.preventDefault();
           pwErr.textContent = '';
-          try {
-            await api('POST', '/api/me/password', { current: pwCur.value, next: pwNew.value });
-            pwCur.value = pwNew.value = '';
-            toast('비밀번호를 바꿨어요.');
-          } catch (er) {
-            pwErr.textContent = er.message;
-          }
+          return withBusy(pwBtn, '바꾸는 중…', async () => {
+            try {
+              await api('POST', '/api/me/password', { current: pwCur.value, next: pwNew.value });
+              pwCur.value = pwNew.value = '';
+              toast('비밀번호를 바꿨어요.');
+            } catch (er) {
+              pwErr.textContent = er.message;
+            }
+          });
         },
       },
       h('h2', null, '비밀번호 변경'),
       h('div', { class: 'field' }, h('label', { for: 'pw-cur' }, '현재 비밀번호'), pwCur),
       h('div', { class: 'field' }, h('label', { for: 'pw-new' }, '새 비밀번호 (8자 이상)'), pwNew),
       pwErr,
-      h('button', { class: 'btn', type: 'submit' }, '변경')
+      pwBtn
     )
   );
 }
@@ -1237,7 +1479,12 @@ async function pageSearch(query) {
       'div',
       null,
       head,
-      h('div', { class: 'empty' }, '노래·정보·구인구직·질문과 멤버를 한 번에 찾아요.', h('br'), '낱말을 띄어 쓰면 모두 들어 있는 글만 나와요. (예: ', h('b', null, '조교 우타우'), ')')
+      emptyState({
+        icon: '🔍',
+        title: '무엇을 찾고 있나요?',
+        desc: '노래·정보·구인구직·질문과 멤버를 한 번에 찾아요. 낱말을 띄어 쓰면 모두 들어 있는 글만 나와요. (예: 조교 우타우)',
+        actions: ['조교', '믹싱', '일러스트'].map((w) => h('a', { class: 'chip btnlike', href: `#/search?q=${encodeURIComponent(w)}` }, w)),
+      })
     );
   }
 
@@ -1263,7 +1510,7 @@ async function pageSearch(query) {
 
   let body;
   if (type === 'members') {
-    body = mem.members.length ? h('div', { class: 'cards' }, mem.members.map(memberCard)) : h('div', { class: 'empty' }, '맞는 멤버가 없어요.');
+    body = mem.members.length ? h('div', { class: 'cards' }, mem.members.map(memberCard)) : emptyState({ icon: '🙋', title: '맞는 멤버가 없어요', desc: '닉네임이나 하는 일로 다시 찾아 보세요.' });
   } else {
     const pager =
       d.pages > 1
@@ -1285,9 +1532,14 @@ async function pageSearch(query) {
         : null
     );
     if (!d.items.length && !(!type && mem.members.length)) {
-      body = h('div', { class: 'empty' }, `“${text}”에 맞는 결과가 없어요.`, h('br'), '낱말을 줄이거나, 띄어쓰기를 빼고 다시 찾아 보세요.');
+      body = emptyState({
+        icon: '🔍',
+        title: `“${text}”에 맞는 결과가 없어요`,
+        desc: '낱말을 줄이거나, 띄어쓰기를 빼고 다시 찾아 보세요.',
+        actions: type ? [h('button', { class: 'btn sm', type: 'button', onclick: () => nav({ type: '' }) }, '전체에서 찾기')] : [],
+      });
     } else if (!d.items.length) {
-      body = h('div', { class: 'stack' }, h('div', { class: 'empty' }, '맞는 글은 없고, 멤버만 찾았어요.'), body);
+      body = h('div', { class: 'stack' }, emptyState({ icon: '🙋', title: '맞는 글은 없고, 멤버만 찾았어요', compact: true }), body);
     }
   }
   return h('div', null, head, h('div', { class: 'filters' }, tabRow), body);
@@ -1314,7 +1566,7 @@ async function pageMembers(query) {
       { class: 'filters' },
       h(
         'div',
-        { class: 'chips' },
+        { class: 'chips scroll' },
         h('button', { class: 'chip btnlike' + (!query.get('role') ? ' on' : ''), onclick: () => nav({ role: '' }) }, '전체'),
         ROLES.map((r) => h('button', { class: 'chip btnlike' + (query.get('role') === r ? ' on' : ''), onclick: () => nav({ role: r }) }, r))
       ),
@@ -1326,7 +1578,7 @@ async function pageMembers(query) {
           { class: 'cards' },
           members.map(memberCard)
         )
-      : h('div', { class: 'empty' }, '조건에 맞는 멤버가 없어요.')
+      : emptyState({ icon: '🙋', title: '조건에 맞는 멤버가 없어요', desc: '하는 일이나 “합작 가능” 조건을 바꿔 보세요.', actions: [h('button', { class: 'btn sm', type: 'button', onclick: () => go('#/members') }, '필터 모두 해제')] })
   );
 }
 
@@ -1338,12 +1590,15 @@ function parseHash() {
 }
 
 let renderSeq = 0;
+let showingNetError = false; // 연결이 돌아오면 자동으로 다시 불러오기 위해 기억해 둬요
 async function render() {
   const seq = ++renderSeq;
   const { path, query } = parseHash();
   closeMenu(false);
   renderHeader(path);
   const app = document.getElementById('app');
+  beginLoading(path);
+  showingNetError = false;
   let m;
   try {
     let node;
@@ -1358,27 +1613,44 @@ async function render() {
     else if (path === '/members') node = await pageMembers(query);
     else if (path === '/search') node = await pageSearch(query);
     else if ((m = path.match(/^\/u\/([^/]+)$/))) node = await pageProfile(decodeURIComponent(m[1]));
-    else node = h('p', { class: 'muted center pad' }, '없는 페이지예요. ', h('a', { href: '#/' }, '홈으로'));
+    else node = errorView({ status: 404, message: '없는 주소예요. 주소가 맞는지 확인하거나 홈에서 다시 찾아 보세요.' });
     if (seq !== renderSeq) return; // 더 최근 이동이 있으면 무시
+    endLoading();
     if (node) {
       app.replaceChildren(node);
+      delete app.dataset.skel;
       window.scrollTo(0, 0);
     }
   } catch (e) {
     if (seq !== renderSeq) return;
-    app.replaceChildren(h('p', { class: 'center pad' }, e.status === 404 ? '찾을 수 없어요.' : e.message, ' ', h('a', { href: '#/' }, '홈으로')));
+    endLoading();
+    showingNetError = !!(e.network || e.timeout);
+    app.replaceChildren(errorView(e));
+    delete app.dataset.skel;
+    window.scrollTo(0, 0);
   }
 }
 
 window.addEventListener('hashchange', render);
+window.addEventListener('offline', () => toast('인터넷 연결이 끊겼어요.', true));
+window.addEventListener('online', () => {
+  toast('다시 연결됐어요.');
+  if (showingNetError) render(); // 연결 오류 화면이었다면 자동으로 다시 불러와요
+});
+window.addEventListener('unhandledrejection', () => toast('문제가 생겼어요. 잠시 뒤에 다시 시도해 주세요.', true));
 document.getElementById('skip').addEventListener('click', (e) => {
   e.preventDefault(); // 주소의 #app 이 화면 이동으로 오해되지 않게 직접 포커스만 옮겨요
   document.getElementById('app').focus();
 });
 if (window.eumTheme) window.eumTheme.apply(window.eumTheme.get()); // 글꼴·CSS가 로드된 뒤 주소창 색 맞추기
 (async () => {
+  // 서버가 잠들어 있으면 /api/me 응답이 오래 걸려요. 기다리는 동안 바로 뼈대 화면을 보여 줘요.
+  const { path } = parseHash();
+  renderHeader(path);
+  beginLoading(path, true);
   try {
     me = (await api('GET', '/api/me')).user;
   } catch {}
+  authReady = true;
   render();
 })();

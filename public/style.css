@@ -486,3 +486,10 @@ body.busy .loadbar { opacity: 1; transition-delay: .35s; } /* 0.35초 안에 끝
 #toast.info .ti { background: var(--accent); color: var(--accent-ink); }
 #toast.bad { background: var(--danger); color: #fff; }
 #toast.bad .ti { background: rgba(255, 255, 255, .28); }
+
+/* ───── 한글 줄바꿈: 글자 중간이 아니라 띄어쓰기에서만 줄을 바꿔요 ─────
+   keep-all = 단어 단위, overflow-wrap = 너무 긴 주소·영문은 넘치지 않게 강제로 끊기 */
+body { word-break: keep-all; overflow-wrap: anywhere; }
+h1, h2, h3, .title, .empty-title, .chip, .btn, .mobnav a, .stat span { word-break: keep-all; }
+.hero h1 { text-wrap: balance; }
+.hero p, .empty-desc, .wake, .notice { text-wrap: pretty; }

@@ -6,17 +6,24 @@
   <meta name="theme-color" content="#f4f6fb">
   <title>이음크루 · 음악 합작 커뮤니티</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="이음크루">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=Noto+Sans+KR:wght@400;500;700&display=swap">
   <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
 </head>
 <body>
+  <a class="skip" id="skip" href="#app">본문으로 바로가기</a>
   <header id="top"></header>
-  <main id="app"><p class="muted center pad">불러오는 중…</p></main>
+  <main id="app" tabindex="-1"><p class="muted center pad">불러오는 중…</p></main>
   <footer id="foot">
     <p>이음크루는 무페이 합작과 정보 공유를 위한 커뮤니티예요. 작업물의 저작권은 올린 사람에게 있어요.</p>
   </footer>
+  <nav id="mobnav" class="mobnav" aria-label="하단 메뉴"></nav>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>
